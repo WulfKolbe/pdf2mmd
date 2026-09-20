@@ -2,35 +2,10 @@
 
 ## Quick start
 
-One file, everything in it:
-
 ```bash
-bash pdf2mmd-setup.sh                  # unpack into ./pdf2mmd and build the venv
-cd pdf2mmd
-./pdf2mmd.sh /path/to/book.pdf 1-20
+./install.sh                          # Install dependencies and build venv
+./pdf2mmd.sh /path/to/book.pdf 1-20   # Convert pages 1-20
 ```
-
-Other forms:
-
-```bash
-bash pdf2mmd-setup.sh --dir ~/tools/pdf2mmd
-bash pdf2mmd-setup.sh --no-venv        # unpack only
-bash pdf2mmd-setup.sh --list           # show the contents, extract nothing
-bash pdf2mmd-setup.sh --force          # overwrite a non-empty folder
-```
-
-`install-pdfminer-fork.sh` builds only the venv — it does **not** ship the
-converter modules. If you ran it first and then hit "Missing module(s)", run
-the setup script over the same folder; it unpacks everything and leaves a
-working `.pdfmm-venv` exactly as it is:
-
-```bash
-bash pdf2mmd-setup.sh --dir /that/folder --force
-```
-
-It refuses a non-empty target unless you pass `--force`, because a
-half-updated folder is exactly the "one stale module" failure the manifest
-check exists to catch. `--force` leaves an existing `.pdfmm-venv` in place.
 
 ## Files
 
