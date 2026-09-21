@@ -837,6 +837,26 @@ def _big_delim_raise(glyphname: str | None) -> float:
     return 0.0
 
 
+def _covers_as_overline(rule: "RuleNode", mid: float,
+                        group: "list[GlyphNode]") -> bool:
+    """Is this rule the `\\overline` drawn on top of a glyph of this group?
+
+    TeX draws the bar to the WIDTH OF THE BOX it covers and places it just
+    above that box's top. So it is contained in the glyph's x-range and sits
+    within a small band above its top edge -- which is where nothing else in
+    a row is: a fraction bar lies on the maths axis, a quarter em above the
+    BASELINE and nowhere near the top of anything.
+
+    `_rule_role` must have said overline first; this only asks which line.
+    """
+    if getattr(rule, "role", None) != "overline":
+        return False
+    return any(rule.rect[0] >= g.rect[0] - 0.5
+               and rule.rect[2] <= g.rect[2] + 0.5
+               and -0.10 * g.size <= mid - g.rect[3] <= 0.40 * g.size
+               for g in group)
+
+
 def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
                size: float = 10.0, others: "list[RuleNode]" = ()) -> str:
     """Classify a rule by what sits above and below it.
@@ -3135,6 +3155,28 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                        and abs(r.rect[0] - g.rect[2]) <= 0.6 * max(g.size, 1.0)
                        and g.rect[1] - 1 <= mid <= g.rect[3] + 1
                        for g in group):
+                    mine.append(r)
+                    continue
+                # 763 -- AN OVERLINE SITS ON TOP OF THE BOX IT COVERS, and
+                # that is higher than 0.8 em above the baseline.
+                #
+                # wzlxjtu-031's second display is
+                # `A=\sum..A_m^sV_m^s \qquad \overline{A}=\sum..` and both
+                # bars went missing: TeX draws `\overline` above the HEIGHT
+                # of what it covers plus three rule thicknesses, which for a
+                # 10pt `A` is 10.13pt -- against a window of 8.0. The line
+                # was handed no rule, the accent was never built, and the
+                # two halves of the equation came out identical.
+                #
+                # Not a wider window. The bar of an overline is drawn to the
+                # WIDTH OF THE BOX, so `\overline{A}` puts a rule at exactly
+                # 177.50..184.97 over an `A` at exactly 177.50..184.97, a
+                # tenth of a point above its top. Nothing else in a row is
+                # laid out like that: a fraction bar sits on the maths axis,
+                # a quarter em above the baseline and nowhere near the top of
+                # anything, and this asks `_rule_role` to have said overline
+                # first.
+                if _covers_as_overline(r, mid, group):
                     mine.append(r)
                     continue
                 # A bar BELOW the baseline cannot belong to this line: an

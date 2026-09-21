@@ -690,6 +690,67 @@ class TestOverlineEdges:
         assert _rule_role(self._rule(440.7, 447.5, 320.0), [n], 10.0) != "overline"
 
 
+class TestTheOverlineIsHigherThanEightTenthsOfAnEm:
+    r"""763 -- which LINE an overline belongs to, not which role it has.
+
+    wzlxjtu-031's second display is
+
+        A=\sum_{s=2}^{\infty}\sum_{|m|<s}A_m^sV_m^s \qquad
+        \overline{A}=\sum_{s=2}^{\infty}\sum_{|m|<s}\overline{A}_m^sV_m^s.
+
+    and both bars went missing, so the two halves came out identical. The
+    rules were read and classified correctly; the line-assembly window is
+    0.8 em from the baseline and TeX draws `\overline` above the HEIGHT of
+    what it covers plus three rule thicknesses -- 10.13pt over a 10pt `A`.
+
+    The way in is not a wider window but the bar's own geometry: it is drawn
+    to the WIDTH OF THE BOX, so the rule spans exactly 177.50..184.97 over an
+    `A` spanning exactly 177.50..184.97, a tenth of a point above its top.
+    """
+
+    def _A(self, x0=177.50, x1=184.97, baseline=611.30, size=10.0):
+        n = g("A", family="math-italic", size=size, baseline=baseline, x=x0)
+        n.rect = (x0, baseline, x1, baseline + size)
+        return n
+
+    def _rule(self, x0, x1, y, role="overline"):
+        from docmodel_six import RuleNode
+        return RuleNode(id="r", page=1, rect=(x0, y, x1, y), role=role)
+
+    def _covers(self, rule, glyphs):
+        from docmodel_six import _covers_as_overline
+        return _covers_as_overline(rule, 0.5 * (rule.rect[1] + rule.rect[3]),
+                                   glyphs)
+
+    def test_the_bar_of_031_is_claimed(self):
+        """10.13pt above the baseline: outside the 0.8 em window, and this
+        is the measurement it was taken from."""
+        assert self._covers(self._rule(177.50, 184.97, 621.43),
+                            [self._A()]) is True
+
+    def test_a_bar_wider_than_the_box_is_not_its_overline(self):
+        """A fraction bar is as wide as the WIDER of the two groups, so one
+        reaching past the glyph below it is covering something else."""
+        assert self._covers(self._rule(170.0, 195.0, 621.43),
+                            [self._A()]) is False
+
+    def test_a_bar_on_the_maths_axis_is_not_an_overline(self):
+        """Where a fraction bar lives: a quarter em above the BASELINE, and
+        nowhere near the top of anything."""
+        assert self._covers(self._rule(177.50, 184.97, 613.80),
+                            [self._A()]) is False
+
+    def test_the_classifier_still_has_the_last_word(self):
+        """This decides WHICH LINE, never whether it is an accent. A rule
+        `_rule_role` called a fraction stays one, wherever it sits."""
+        assert self._covers(self._rule(177.50, 184.97, 621.43, "fraction"),
+                            [self._A()]) is False
+
+    def test_a_bar_far_above_the_box_belongs_to_the_line_above(self):
+        assert self._covers(self._rule(177.50, 184.97, 627.0),
+                            [self._A()]) is False
+
+
 class TestAbsorptionOrder:
     """Neutral operators must be absorbed BEFORE operator names.
 
