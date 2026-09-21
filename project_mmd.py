@@ -1618,7 +1618,7 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                         if re.fullmatch(r"[-+=<>/(){}\[\],.;:|*!'\d\s]+", t):
                             pieces.append(t)          # operators and numbers
                         else:
-                            pieces.append(rf"\text{{{t}}}")
+                            pieces.append(rf"\text{{{_escape_in_text(t)}}}")
                 inner = " ".join(x for x in pieces if x).strip()
                 # A tag SHARING a span with the mathematics survives the span
                 # filter above, so remove the token here. This strips only
@@ -1824,6 +1824,26 @@ def _escape_tex(t: str) -> str:
     `\nSum` and friends as commands defined by no package.
     """
     return "".join(_TEX_SPECIAL.get(c, c) for c in t)
+
+
+#: TeX specials that a TEXT run may contain and `\text{}` cannot.
+#:
+#: 754 -- prose inside a formula is wrapped in `\text{...}` and was put there
+#: VERBATIM. wzlxjtu-073 sets `m_{ij} = \#\{k : (i,j,k) \in J\}`, and the `#`
+#: reached the output as `\text{#}` -- a parameter character, which is
+#: "Illegal parameter number" and takes the whole cell down. `_` is the same
+#: hazard and the one you flagged first: an index named `gb_imp` inside
+#: `\text{}` is "Missing $ inserted".
+#:
+#: NOT `\`, `{` or `}`: those arrive here only from a glyph the reader
+#: projected, and rewriting them would break a run that is already LaTeX.
+_TEXT_SPECIAL = {"#": r"\#", "%": r"\%", "&": r"\&", "_": r"\_",
+                 "$": r"\$", "~": r"\textasciitilde{}",
+                 "^": r"\textasciicircum{}"}
+
+
+def _escape_in_text(t: str) -> str:
+    return "".join(_TEXT_SPECIAL.get(c, c) for c in t)
 
 
 def _flush_eq(out: list, rows: list) -> None:

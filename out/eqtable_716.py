@@ -404,7 +404,37 @@ def unrenderable_cells(bodies: list, preamble: str, work: Path) -> set:
         if not idx:
             break
         bad.add(live[min(idx)])
-    return bad
+
+    # 754 -- AND CONVICT NOBODY WITHOUT A TRIAL OF THEIR OWN.
+    #
+    # "One culprit per pass" narrows a cascade; it does not eliminate one.
+    # TeX reports the line where it NOTICED a problem, which after a runaway
+    # can be a later cell that is perfectly good. wzlxjtu-073's
+    #
+    #     m_{ij} = \text{\#} \{k : (i, j, k) \in J \}.
+    #
+    # was marked unrenderable, and compiles clean ALONE, under the real
+    # preamble, in this probe's exact \hbox form. It was a bystander.
+    #
+    # Each conviction is now re-tried on its own, which is the one test with
+    # no cascade in it. A cell that compiles alone is cleared. One short
+    # compile per convicted cell, and there are never many.
+    cleared = set()
+    for _b in bad:
+        probe = work / "cellone.tex"
+        probe.write_text("\n".join(
+            [preamble,
+             r"\begingroup\setbox0=\hbox{$\displaystyle " + _b + r"$}\endgroup",
+             r"\mbox{}", r"\end{document}", ""]), encoding="utf-8")
+        subprocess.run(["xelatex", "-interaction=nonstopmode", "-no-shell-escape",
+                        "-output-directory", str(work), str(probe)],
+                       capture_output=True, text=True, timeout=600)
+        log = work / "cellone.log"
+        txt = (log.read_text(encoding="utf-8", errors="replace")
+               if log.is_file() else "! ")
+        if not re.search(r"(?m)^! ", txt):
+            cleared.add(_b)
+    return bad - cleared
 
 
 _FITMATH = re.compile(r"\\FitMath\{\$\\displaystyle ((?:[^$\\]|\\.)*)\$\}")
