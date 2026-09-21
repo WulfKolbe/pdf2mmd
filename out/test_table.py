@@ -254,3 +254,24 @@ def test_the_first_page_head_is_not_the_continuation_head():
     s = eq.table_open("c", (10, 119, 119, 118), heads, "slug")
     first = s.split("\\endfirsthead")[0]
     assert "continued" not in first
+
+
+# --- 766: the appendix must not look like the document's own table ---------
+
+def test_the_appendix_names_the_source_and_never_says_no_gold():
+    r"""766 — the appendix had the document table's four columns and a gold
+    column reading "no gold" in every row. Searching the file for a document
+    lands on two sections with its name, and the second one — one row, an
+    empty MathPix column, "no gold" — reads as the DOCUMENT having no
+    equations and no gold. Reported for 041, and again for 031, whose table
+    above it carries all seventeen."""
+    rows = eq.appendix_rows(["m0", "m1"], [1], ["p0"], [0])
+    assert len(rows) == 2
+    assert rows[0].startswith("MathPix & ") and "m1" in rows[0]
+    assert rows[1].startswith("pdf2mmd & ") and "p0" in rows[1]
+    assert not any("no gold" in r for r in rows)
+    assert all(r.count("&") == 1 for r in rows), "two columns, not four"
+
+
+def test_the_appendix_of_a_document_with_nothing_left_over_is_empty():
+    assert eq.appendix_rows(["m"], [], ["p"], []) == []

@@ -638,6 +638,22 @@ def cell(body: str, env: str = "") -> str:
             "(will not typeset)}" % rt.esc_source(body))
 
 
+def appendix_rows(mpx: list, m_left: list, p2m: list, p_left: list) -> list:
+    """One row per leftover block: which source emitted it, and the block.
+
+    766 -- TWO columns, and never the words "no gold". The appendix used the
+    document table's four, with a gold column saying "no gold" in every row,
+    and a reader searching the file for a document landed on it and read the
+    DOCUMENT as having no equations and no gold.
+    """
+    out = []
+    for src, blocks, left in (("MathPix", mpx, m_left),
+                              ("pdf2mmd", p2m, p_left)):
+        for j in left:
+            out.append("%s & %s \\\\ \\hline\n" % (src, cell(blocks[j])))
+    return out
+
+
 def table_open(caption: str, widths, heads, banner: str) -> str:
     r"""`rt.table_open`, with the DOCUMENT NAME on every page it runs onto.
 
@@ -838,21 +854,31 @@ def main():
         # the two readings of it, and 106 rows with an empty gold column
         # broke the run. So they go in a table of their OWN, after it, where
         # there is nothing to read across and the heading says so.
+        #
+        # 766 -- AND IT MUST NOT LOOK LIKE THE DOCUMENT'S OWN TABLE.
+        #
+        # It had the same four columns, the same heading shape and a gold
+        # column reading "no gold" in every row. Searching the file for a
+        # document lands on TWO sections with its name, and the second one
+        # -- one row, an empty MathPix column, "no gold" -- reads as the
+        # document itself having no equations and no gold. Reported twice,
+        # for 041 and again for 031, whose real table above it carries all
+        # seventeen equations.
+        #
+        # Two columns now, one row per leftover block, naming the source. It
+        # cannot be read across, so it must not be shaped like something
+        # that can; and the words "no gold" are gone, because they were a
+        # property of the ROW, never of the document.
         if not A.no_unmatched and (m_left or p_left):
-            # the caption goes through `table_open`, which puts it in a
-            # `\section*`; passing "" left an EMPTY heading on the page.
+            u_w = (28, span - 28)
             parts.append(table_open(
-                "%s — blocks matching no gold equation: MathPix %d, pdf2mmd %d"
+                "%s — APPENDIX: blocks this source emitted that match no "
+                "gold equation (MathPix %d, pdf2mmd %d). The document's own "
+                "equations are in the table above."
                 % (rt.esc_text(slug), len(m_left), len(p_left)),
-                widths, heads,
-                "%s — blocks matching no gold equation" % rt.esc_text(slug)))
-            UNM = r"{\itshape\footnotesize no gold}"
-            for j in m_left:
-                parts.append(" & ".join(["--", UNM, cell(mpx[j]), "--"])
-                             + " \\\\ \\hline\n")
-            for j in p_left:
-                parts.append(" & ".join(["--", UNM, "--", cell(p2m[j])])
-                             + " \\\\ \\hline\n")
+                u_w, ("source", "block matching no gold equation"),
+                "%s — appendix, leftover blocks" % rt.esc_text(slug)))
+            parts.extend(appendix_rows(mpx, m_left, p2m, p_left))
             parts.append("\\end{longtable}\n")
 
     body = "".join(parts)
