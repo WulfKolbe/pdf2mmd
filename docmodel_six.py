@@ -857,6 +857,43 @@ def _covers_as_overline(rule: "RuleNode", mid: float,
                for g in group)
 
 
+def _off_row_band(grp: list, rules: list, span_pt: float) -> bool:
+    r"""Is every glyph of this band OFF-ROW material?
+
+    767 -- "off-row" is not "smaller than the row". A DISPLAY-STYLE FRACTION
+    SETS ITS PARTS AT TEXT SIZE: `\frac{1}{2}` beside a 9.96pt row draws its
+    `1` and its `2` at 9.96pt, one above the maths axis and one below. So a
+    band carrying a fraction fails a pure size test and 733 -- which places
+    each script on the band holding its base, by stream -- never looks at it.
+
+    wzlxjtu-031's eighth display is the case:
+
+        band   s m | s-1 m+1 | 1 2 | 2s 2 | s m+1     15 glyphs at 6.97pt
+                                                       and 2 at 9.96pt
+        row    \partial C - e^{\rho}(C - g (-1, m+1)C
+
+    -- every script of the equation on a line of its own, so the row was
+    emitted WITHOUT them and the band as a second block of its own.
+
+    A full-size glyph is off-row when a fraction RULE says so: its centre
+    falls in the bar's x-range and its baseline is not the bar's axis, which
+    is what makes it a numerator or a denominator rather than a term of the
+    row. That is evidence the page drew, not an inference about size.
+    """
+    for g in grp:
+        if g.size < 0.95 * span_pt:
+            continue                     # a script: off-row by size
+        cx = 0.5 * (g.rect[0] + g.rect[2])
+        if any(r.role == "fraction"
+               and r.rect[0] - 1 <= cx <= r.rect[2] + 1
+               and abs(g.baseline - 0.5 * (r.rect[1] + r.rect[3]))
+               > 0.12 * span_pt
+               for r in rules):
+            continue                     # a fraction part: off-row by rule
+        return False                     # a term of the row itself
+    return True
+
+
 def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
                size: float = 10.0, others: "list[RuleNode]" = ()) -> str:
     """Classify a rule by what sits above and below it.
@@ -2972,7 +3009,7 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                 grp = groups[_i]
                 if not grp or not all(g.stream >= 0 for g in grp):
                     continue
-                if max(g.size for g in grp) >= 0.95 * span_pt:
+                if not _off_row_band(grp, rules, span_pt):
                     continue                  # not a band of scripts
                 # PER GLYPH, not per band. Voting a whole band to one
                 # destination was tried and over-merged: a single band of

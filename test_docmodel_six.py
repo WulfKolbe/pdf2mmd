@@ -2049,3 +2049,70 @@ class TestAWideFractionBar:
         above = self._row(677.2, 110.0, 300.0)
         below = self._row(663.0, 110.0, 280.0)
         assert _rule_role(bar, above + below, 12.0) == "separator"
+
+
+class TestABandIsOffRowMaterialNotJustSmallType:
+    r"""767 -- a display-style fraction sets its parts at TEXT size.
+
+    733 places a band of scripts on the row holding their bases, by stream,
+    and asks "is this a band?" with `max(size) < 0.95 * span_pt`.
+    `\frac{1}{2}` beside a 9.96pt row draws its `1` and `2` at 9.96pt, so a
+    band carrying a fraction fails that test and 733 never looks at it.
+
+    wzlxjtu-031's eighth display arrived as
+
+        band   s m | s-1 m+1 | 1 2 | 2s 2 | s m+1
+        row    \partial C - e^{\rho}(C - g (-1, m+1)C
+
+    -- every script of the equation on a line of its own, the row emitted
+    without them, and the band as a second block. The fraction RULE is what
+    says a full-size glyph is a numerator and not a term of the row.
+    """
+
+    SPAN = 9.9626
+
+    def _g(self, x, baseline, size):
+        return g("x", size=size, baseline=baseline, x=x)
+
+    def _bar(self, x0, x1, y, role="fraction"):
+        from docmodel_six import RuleNode
+        return RuleNode(id="r", page=1, rect=(x0, y, x1, y), role=role)
+
+    def _off(self, grp, rules):
+        from docmodel_six import _off_row_band
+        return _off_row_band(grp, rules, self.SPAN)
+
+    def test_a_band_of_scripts_is_one(self):
+        assert self._off([self._g(100.0, 230.0, 6.97),
+                          self._g(110.0, 216.0, 6.97)], []) is True
+
+    def test_a_fraction_part_at_text_size_does_not_disqualify_it(self):
+        """031's band: fifteen 6.97pt scripts and the `1` and `2` of a half,
+        both at 9.96pt, one above the bar's axis and one below."""
+        bar = self._bar(118.0, 124.0, 223.0)
+        grp = [self._g(100.0, 230.0, 6.97),
+               self._g(119.0, 230.0, self.SPAN),      # the 1, above the axis
+               self._g(119.0, 216.5, self.SPAN)]      # the 2, below it
+        assert self._off(grp, [bar]) is True
+
+    def test_a_full_size_glyph_with_no_bar_over_it_is_a_row(self):
+        """Without a rule saying otherwise, a full-size glyph is a term of
+        the row and this band is a row. That is the guard 733 had."""
+        assert self._off([self._g(100.0, 230.0, 6.97),
+                          self._g(119.0, 230.0, self.SPAN)], []) is False
+
+    def test_a_glyph_on_the_bar_s_own_axis_is_not_a_fraction_part(self):
+        """A term standing BESIDE the fraction shares the row's baseline,
+        which is the bar's axis. Only what is displaced is a part of it."""
+        bar = self._bar(118.0, 124.0, 223.0)
+        beside = self._g(119.0, 223.0, self.SPAN)
+        assert self._off([beside], [bar]) is False
+
+    def test_a_glyph_outside_the_bar_s_x_range_is_not_its_part(self):
+        bar = self._bar(118.0, 124.0, 223.0)
+        assert self._off([self._g(200.0, 230.0, self.SPAN)], [bar]) is False
+
+    def test_an_overline_is_not_a_fraction_bar(self):
+        """Only a rule `_rule_role` called a fraction licenses a part."""
+        bar = self._bar(118.0, 124.0, 223.0, "overline")
+        assert self._off([self._g(119.0, 230.0, self.SPAN)], [bar]) is False
