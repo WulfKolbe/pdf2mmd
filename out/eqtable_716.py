@@ -185,12 +185,36 @@ def inline_math(md: Path) -> list:
 
 
 def md_blocks(md: Path) -> list:
+    r"""The display-maths blocks of a markdown file.
+
+    758 -- `$$` IS A DELIMITER WHEREVER IT IS, not only alone on a line.
+    This matched `^\$\$\s*$` at both ends, and a producer is not obliged to
+    put the delimiter on a line of its own. wzlxjtu-041 opens
+
+        a) and Assumption 4a, ... are identified:$$
+        \theta_{1}^{n}=\theta_{1}^{1,0}(1) \text { and } ...
+        $$
+
+    with the OPENING `$$` glued to the prose. Invisible to that pattern, so
+    the parser paired the CLOSING `$$` with the next one and captured the
+    prose between them. Every equation in the document was skipped and four
+    paragraphs of prose were read as equations; MathPix scored 0 of 6 there
+    and the fault was here.
+
+    wzlxjtu-071 fails the same test from the other side: one closing `$$` is
+    followed by inline maths on the same line, so it was not a closer either,
+    and two equations plus the prose between them came back as ONE block.
+
+    Splitting on the delimiter instead: the odd segments are inside display
+    maths. Measured over all 204 markdown files in the corpus -- 202
+    unchanged, and the two that change are these two, both correct after.
+    """
     if not md.is_file():
         return []
     t = md.read_text(encoding="utf-8", errors="replace")
-    return [strip_noise(b) for b in
-            re.findall(r"^\$\$\s*$(.*?)^\$\$\s*$", t, re.S | re.M)
-            if strip_noise(b)]
+    parts = re.split(r"(?<!\\)\$\$", t)
+    return [strip_noise(b) for i, b in enumerate(parts)
+            if i % 2 == 1 and strip_noise(b)]
 
 
 def as_inline(env: str, body: str) -> str:
@@ -232,8 +256,11 @@ _SYN = {r'\varepsilon': r'\epsilon', r'\varphi': r'\phi', r'\leqslant': r'\le',
         # this matcher never got it.
         r'\mid': '|', r'\vert': '|', r'\Vert': r'\|',
         r'\parallel': r'\|'}
+# 758: `\mbox` is `\text`. Gold writes `\mbox{ and }` where MathPix writes
+# `\text { and }`, and with only one of them stripped the two keys differed
+# by a whole token -- wzlxjtu-041's first equation, identical in both.
 _FONT = re.compile(r'\\(mathcal|mathrm|mathbb|mathbf|mathit|mathds|boldsymbol'
-                   r'|bm|text|cal|bf|rm|it)\s*')
+                   r'|bm|text|mbox|hbox|cal|bf|rm|it)\s*')
 _SIZE = re.compile(r'\\(left|right|bigg?|Bigg?)(l|r|m)?(?![A-Za-z])')
 _SPACE = re.compile(r'\\[,;:!>]|\\quad|\\qquad|\\hspace\{[^}]*\}|~')
 _NOISE = re.compile(r'\\label\{[^}]*\}|\\notag|\\nonumber|\\displaystyle|\\!')
