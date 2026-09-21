@@ -1055,6 +1055,29 @@ def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
                 if abs(cx - 0.5 * (x0 + x1)) < 6.0 * size:
                     if _belongs_to_another_bar(g, cx):
                         continue
+                    # 768 -- A SCRIPT IS NOT A TEXT LINE RUNNING ACROSS.
+                    #
+                    # This counts what else sits on the numerator's baseline
+                    # to tell a numerator from a line of text passing over
+                    # the bar. A DISPLAY'S SUPERSCRIPTS SIT AT THAT HEIGHT
+                    # TOO: wzlxjtu-015 sets
+                    #
+                    #   S^{(W)}_{ct}=4\int d^5x\sqrt{\gamma}
+                    #       [\frac12\sigma^2+\frac34(\phi^0)^2- ...]
+                    #
+                    # whose numerators `1` and `3` share baseline 190.38 with
+                    # the exponents of `\sigma^2` and `(\phi^0)^2`. Those
+                    # exponents are outside the bars and have no bar of their
+                    # own, so the count was never zero and TWO fraction bars
+                    # were classified `overline` -- after which the span
+                    # carried an unaccounted rule and refused.
+                    #
+                    # An overline's base is part of a RUNNING TEXT LINE, and
+                    # a running text line is not set in script type. So a
+                    # glyph smaller than the surrounding type cannot be the
+                    # evidence this test is looking for.
+                    if g.size < 0.95 * max(size, 1.0):
+                        continue
                     outside += 1
         return outside == 0
 

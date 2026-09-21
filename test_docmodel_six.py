@@ -2116,3 +2116,58 @@ class TestABandIsOffRowMaterialNotJustSmallType:
         """Only a rule `_rule_role` called a fraction licenses a part."""
         bar = self._bar(118.0, 124.0, 223.0, "overline")
         assert self._off([self._g(119.0, 230.0, self.SPAN)], [bar]) is False
+
+
+class TestAScriptIsNotATextLineRunningAcrossTheBar:
+    r"""768 -- a display's superscripts share the numerator's baseline.
+
+    `_is_own_row` tells a numerator from a line of text passing over the bar
+    by counting what else sits on the numerator's baseline outside the bar.
+    wzlxjtu-015 sets
+
+        S^{(W)}_{ct}=4\int d^5x\sqrt{\gamma}
+            [\tfrac12\sigma^2+\tfrac34(\phi^0)^2-\tfrac{1}{16}(\phi^3)^2 ...]
+
+    whose numerators `1` and `3` sit at baseline 190.38 -- and so do the
+    exponents of `\sigma^2` and `(\phi^0)^2`. Those exponents are outside the
+    bars and have no bar of their own, so the count was never zero: two
+    fraction bars were classified `overline`, the span then carried an
+    unaccounted rule, and the whole display refused.
+
+    An overline's base is part of a RUNNING TEXT LINE, and a running text
+    line is not set in script type.
+    """
+
+    SIZE = 12.0
+    BAR = (210.10, 215.95)
+    AXIS = 185.30
+
+    def _rule(self, x0=None, x1=None):
+        from docmodel_six import RuleNode
+        x0 = self.BAR[0] if x0 is None else x0
+        x1 = self.BAR[1] if x1 is None else x1
+        return RuleNode(id="r", page=1, rect=(x0, self.AXIS, x1, self.AXIS))
+
+    def _g(self, x, baseline, size=None):
+        return g("one", size=size or self.SIZE, baseline=baseline, x=x)
+
+    def _parts(self):
+        """The `1` over the `2`, both inside the bar."""
+        return [self._g(210.10, 190.38), self._g(210.10, 174.09)]
+
+    def _role(self, extra):
+        from docmodel_six import _rule_role
+        r = self._rule()
+        return _rule_role(r, self._parts() + extra, self.SIZE, [r])
+
+    def test_a_superscript_on_that_baseline_does_not_demote_the_bar(self):
+        """8.4pt at 12pt type: an exponent, 40pt to the right of the bar."""
+        assert self._role([self._g(250.0, 190.38, 8.4)]) == "fraction"
+
+    def test_a_full_size_glyph_on_that_baseline_still_does(self):
+        """The guard this test protects: a line of text running across the
+        bar is set in the surrounding type, and then the bar is an accent."""
+        assert self._role([self._g(250.0, 190.38)]) != "fraction"
+
+    def test_with_nothing_beside_it_the_bar_is_a_fraction(self):
+        assert self._role([]) == "fraction"
