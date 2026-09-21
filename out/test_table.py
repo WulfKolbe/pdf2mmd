@@ -141,3 +141,28 @@ def test_an_unrenderable_cell_does_not_end_the_row():
         c = eq.cell(bad)
         assert "will not typeset" in c, bad
         assert "\\\\" not in c, c
+
+
+def test_alignat_loses_its_column_count_but_keeps_its_mathematics(tmp_path):
+    r"""759 — `\begin{alignat*}{3}` takes an ARGUMENT. It was not in ENVS at
+    all, so wzlxjtu-082's second equation had never been counted."""
+    gt = tmp_path / "1_gt.tex"
+    gt.write_text("\\begin{document}\n"
+                  r"\begin{alignat*}{3} p_0(h)\equiv 1 \end{alignat*}"
+                  "\n\\end{document}\n", encoding="utf-8")
+    gold = eq.gold_equations(gt)
+    assert len(gold) == 1
+    assert gold[0][1].startswith("p_0(h)"), gold[0][1]
+
+
+def test_no_other_environment_loses_a_leading_braced_group(tmp_path):
+    r"""And the argument strip must apply to `alignat` ONLY. Applied to every
+    environment it ate real mathematics -- wzlxjtu-026's `{\cal C}^2 = 1`
+    lost its `{\cal C}` -- and the corpus correct count fell by nine for a
+    change meant to add one."""
+    gt = tmp_path / "1_gt.tex"
+    gt.write_text("\\begin{document}\n"
+                  r"\begin{equation}{\cal C}^2 = 1\end{equation}"
+                  "\n\\end{document}\n", encoding="utf-8")
+    gold = eq.gold_equations(gt)
+    assert gold[0][1] == r"{\cal C}^2 = 1", gold[0][1]

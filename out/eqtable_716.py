@@ -56,14 +56,28 @@ sys.path.insert(0, os.environ.get("PDFDRILL_SRC",
                                   str(Path.home() / "MX/PDFDRILL/src")))
 from pdfdrill import report_tex as rt          # noqa: E402
 
+#: 759 -- `alignat` TAKES AN ARGUMENT, and was not in this list at all.
+#: Audited: over the 102 gold files every display environment that occurs
+#: standalone is here. `array` occurs 28 times and `split` once, and both
+#: are always INSIDE one of these -- checked, zero standalone -- so they are
+#: counted through the outer environment and must not be listed, or they
+#: would be counted twice. `alignat*` occurs once, in wzlxjtu-082, and is
+#: NOT nested: it follows the prose "The functions $p_k(h)$ are". That gold
+#: equation had never been counted, and MathPix's one unmatched block in
+#: that document is exactly it.
 ENVS = ("equation*", "equation", "eqnarray*", "eqnarray", "align*", "align",
+        "alignat*", "alignat",
         "gather*", "gather", "multline*", "multline", "displaymath")
+
+#: `\begin{alignat*}{3}` — the column count is an ARGUMENT, not content.
+_ENV_ARG = re.compile(r"^\s*\{[^{}]*\}")
 
 #: display_safe()/renderable() judge an expression for a `$...$` cell, so a
 #: display environment must first be mapped to its in-math counterpart --
 #: exactly what to_inline_env does for the report's own Rendered column.
 _ENV_MAP = {"eqnarray": "aligned", "eqnarray*": "aligned",
             "align": "aligned", "align*": "aligned",
+            "alignat": "aligned", "alignat*": "aligned",
             "gather": "gathered", "gather*": "gathered",
             "multline": "gathered", "multline*": "gathered"}
 
@@ -117,7 +131,14 @@ def gold_equations(tex: Path) -> list:
     for env in ENVS:
         for m in re.finditer(r"\\begin\{" + re.escape(env) + r"\}(.*?)\\end\{"
                              + re.escape(env) + r"\}", t, re.S):
-            out.append((m.start(), env, strip_noise(m.group(1))))
+            # ONLY alignat takes an argument. Stripping a leading braced
+            # group from every environment ate real mathematics: wzlxjtu-026's
+            # `{\cal C}^2 = 1` lost its `{\cal C}`, and the corpus correct
+            # count fell by nine equations for a change that was meant to add
+            # one.
+            body = (_ENV_ARG.sub("", m.group(1))
+                    if env.startswith("alignat") else m.group(1))
+            out.append((m.start(), env, strip_noise(body)))
             seen.append((m.start(), m.end()))
 
     def covered(pos):
