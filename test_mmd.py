@@ -1221,3 +1221,56 @@ class TestDisplayContinuation:
             g.text = "z"
         assert M.mark_display_continuations(page) == 0
         assert getattr(head, "forced_display", False) is False
+
+
+class TestAWideDisplayIsStillCentred:
+    r"""762 -- the centring test had a floor a wide display cannot clear.
+
+    wzlxjtu-031's eleventh equation fills its 245pt revtex column: it begins
+    3.70pt past the column margin and ends 3.69pt short of the right one. As
+    symmetric as a measurement gets, and a tenth of the em the test demanded
+    on each side -- so it was emitted as an inline `$...$` in the middle of
+    the prose. Not a crop, not in any equation list; simply no longer an
+    equation.
+
+    What the floor guards against is calling a FLUSH line centred, and a
+    flush line has a gap of zero on one side. The symmetry carries that.
+    """
+
+    LEFT, RIGHT, SIZE = 100.0, 345.0, 9.96
+
+    def _line(self, x0, x1):
+        import docmodel_six as D
+        import texmap
+        gl, x = [], x0
+        while x < x1:
+            w = min(6.0, x1 - x)
+            gl.append(D.GlyphNode(
+                id="g%.1f" % x, page=1, rect=(x, 600.0, x + w, 600.0 + self.SIZE),
+                text="x", cid=0, glyphname=None, fontname="ABC+CMMI10",
+                family="math-italic", size=self.SIZE,
+                tex=texmap.TexToken("x", "atom", None, "corpus"),
+                matrix=(self.SIZE, 0, 0, self.SIZE, x, 600.0)))
+            x += 8.0
+        return D.LineNode(id="l", page=1,
+                          rect=(x0, 600.0, gl[-1].rect[2], 600.0 + self.SIZE),
+                          type="formula", glyphs=gl)
+
+    def _disp(self, x0, x1):
+        return M.is_display(self._line(x0, x1), self.LEFT, self.RIGHT)
+
+    def test_the_column_filling_display_is_one(self):
+        assert self._disp(103.70, 341.31) is True
+
+    def test_a_flush_line_is_not(self):
+        """Left gap zero: whatever the right edge does, it is not centred."""
+        assert self._disp(100.0, 341.31) is False
+
+    def test_an_indented_but_lopsided_line_is_not(self):
+        """4pt in on the left and 25 short on the right is a ragged end,
+        not a centring."""
+        assert self._disp(104.0, 320.0) is False
+
+    def test_a_generously_centred_display_still_is(self):
+        """The case the old floor was written for, unchanged."""
+        assert self._disp(160.0, 285.0) is True

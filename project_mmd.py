@@ -683,7 +683,30 @@ def is_display(ln: LineNode, left: float,
             x0 = min(g.rect[0] for g in body)
             x1 = max(g.rect[2] for g in body)
             lgap, rgap = x0 - left, right - x1
-            if (lgap > 1.0 * size and rgap > 1.0 * size
+            # 762 -- A WIDE DISPLAY IS STILL CENTRED, with barely any gap
+            # to show for it. wzlxjtu-031's eleventh equation fills its
+            # 245pt column: lgap 3.70, rgap 3.69 -- as symmetric as a
+            # measurement gets, and a tenth of the em this test demanded on
+            # each side. It was emitted as an inline `$...$` in the middle
+            # of the prose, which is the 737 failure again: not a crop, not
+            # in any equation list, simply no longer an equation.
+            #
+            # The floor was never what separates a display from prose --
+            # the prose test below does that, and refuses any line with a
+            # word on it. What the floor protects against is calling a
+            # flush line centred, and a flush line has one gap at zero, so
+            # the SYMMETRY carries the claim. Swept over the corpus:
+            #
+            #     1.00 em   correct 174   matched 314   crops 231
+            #     0.35 em   correct 175   matched 315   crops 231
+            #     0.25 em   correct 175   matched 315   crops 231
+            #     0.00 em   correct 175   matched 315   crops 231
+            #
+            # Flat from 0 to 0.35 and it costs an equation at 0.6, so this
+            # is not a threshold being tuned to one document. 0.25 em --
+            # half the indent rule above, comfortably under 031's 0.37.
+            _GAP = float(os.environ.get("PDF2MMD_CENTRE_GAP", "0.25"))
+            if (lgap > _GAP * size and rgap > _GAP * size
                     and abs(lgap - rgap) <= 0.5 * max(lgap, rgap)):
                 pass                       # centred: it is a display
             else:
