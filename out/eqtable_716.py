@@ -556,8 +556,9 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--paper", default="a3")
     ap.add_argument("--no-compile", action="store_true")
-    ap.add_argument("--unmatched", action="store_true",
-                    help="also list blocks that match no gold equation")
+    ap.add_argument("--no-unmatched", action="store_true",
+                    help="omit the per-document table of blocks that match "
+                         "no gold equation (they are shown by default)")
     A = ap.parse_args()
 
     w_mm, h_mm = rt.PAPER_MM[A.paper]
@@ -662,17 +663,38 @@ def main():
         # They are still COUNTED, per document in the caption and once at the
         # end, so nothing is hidden; `--unmatched` puts the rows back for when
         # the question is "what did it emit that is not an equation at all".
-        UNM = r"{\itshape\footnotesize (unmatched)}"
-        if A.unmatched:
+        stats["left_m"] += len(m_left)
+        stats["left_p"] += len(p_left)
+        parts.append("\\end{longtable}\n")
+
+        # 756 -- AND THEN SHOW THE ONES WITH NOWHERE TO GO.
+        #
+        # A block matching no gold equation used to get no row at all. It was
+        # counted in the caption, so nothing was strictly hidden -- but 61 of
+        # them (MathPix 8, pdf2mmd 53) never appeared, and a reader looking
+        # for a document's Nth equation found N-1 rows and no sign of the
+        # rest. Counted is not shown.
+        #
+        # They were interleaved with the real rows once and that WAS wrong:
+        # every row of the main table exists to be read ACROSS, gold beside
+        # the two readings of it, and 106 rows with an empty gold column
+        # broke the run. So they go in a table of their OWN, after it, where
+        # there is nothing to read across and the heading says so.
+        if not A.no_unmatched and (m_left or p_left):
+            # the caption goes through `table_open`, which puts it in a
+            # `\section*`; passing "" left an EMPTY heading on the page.
+            parts.append(rt.table_open(
+                "%s — blocks matching no gold equation: MathPix %d, pdf2mmd %d"
+                % (rt.esc_text(slug), len(m_left), len(p_left)),
+                widths, False, False, heads=heads))
+            UNM = r"{\itshape\footnotesize no gold}"
             for j in m_left:
                 parts.append(" & ".join(["--", UNM, cell(mpx[j]), "--"])
                              + " \\\\ \\hline\n")
             for j in p_left:
                 parts.append(" & ".join(["--", UNM, "--", cell(p2m[j])])
                              + " \\\\ \\hline\n")
-        stats["left_m"] += len(m_left)
-        stats["left_p"] += len(p_left)
-        parts.append("\\end{longtable}\n")
+            parts.append("\\end{longtable}\n")
 
     body = "".join(parts)
     title = ("Display equations — gold vs MathPix vs pdf2mmd "

@@ -21,6 +21,7 @@ scripts produce.
 | `sweep.py` | which gold equations are not reproduced, and the refusals behind them |
 | `canon.py` | the dialect-aware comparison: is this reading right, however spelled |
 | `eqtable_716.py` | the four-column table — No, gold, MathPix, pdf2mmd |
+| `test_table.py` | the table pipeline, fed deliberately malformed elements |
 
 ## The loop
 
@@ -44,9 +45,25 @@ by accident — which is the point of the separation.
 python3 eqtable_716.py                               # default output path
 python3 eqtable_716.py --out /somewhere/table.tex    # elsewhere
 python3 eqtable_716.py --no-compile                  # .tex only
-python3 eqtable_716.py --unmatched                   # also list blocks that
+python3 eqtable_716.py --no-unmatched                # omit the per-document
+                                                     # table of blocks that
                                                      # match no gold equation
 ```
+
+Blocks matching no gold equation are shown BY DEFAULT, in a small table of
+their own after each document's. They used to be counted in the caption and
+not shown, and 61 of them (MathPix 8, pdf2mmd 53) never appeared anywhere:
+a reader looking for a document's Nth equation found N-1 rows and no sign of
+the rest. Counted is not shown. They are kept out of the main table because
+every row there exists to be read ACROSS -- gold beside the two readings of
+it -- and a row with an empty gold column breaks that run.
+
+Run `python3 -m pytest test_table.py -q` after changing anything in this
+folder. It feeds unbalanced braces, an unpaired `\left`, a comment
+character, a parameter character, a subscript in text mode, an empty block
+and a 4000-character line through the whole chain, and asserts the two
+properties the instrument depends on: every gold equation gets a row, and
+every block a source emitted is either matched or listed.
 
 It writes `716-equations.tex` and compiles it to `716-equations.pdf`. Five
 things happen, in this order:
