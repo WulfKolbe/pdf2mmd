@@ -230,3 +230,27 @@ def test_the_rows_of_one_environment_keep_their_order(tmp_path):
                  r"\begin{equation}Z\end{equation}"
                  r"\begin{align} A&=x\\ B&=y\\ C&=z \end{align}")
     assert [b for _, b in gold] == ["Z", r"A&=x", r"B&=y", r"C&=z"]
+
+
+# --- 765: the document name on every page the table runs onto --------------
+
+def test_a_table_that_runs_over_a_page_says_whose_it_is():
+    r"""765 — wzlxjtu-031 starts at the foot of one page with two rows and
+    continues at the top of the next with fifteen. `longtable` repeats the
+    column header there and nothing else, so those fifteen rows sat under
+    `No | gold | MathPix | pdf2mmd` with no document name on the page, and
+    the two rows left behind read as the whole of it."""
+    heads = ("No", "gold (author)", "MathPix", "pdf2mmd")
+    s = eq.table_open("wzlxjtu-031 — gold 17", (10, 119, 119, 118),
+                      heads, "wzlxjtu-031")
+    assert "\\endfirsthead" in s and "\\endhead" in s
+    assert s.index("\\endfirsthead") < s.index("\\endhead")
+    assert s.count("wzlxjtu-031 — continued") == 1
+    assert s.count("\\textbf{MathPix}") == 2      # first head, and the repeat
+
+
+def test_the_first_page_head_is_not_the_continuation_head():
+    heads = ("No", "gold (author)", "MathPix", "pdf2mmd")
+    s = eq.table_open("c", (10, 119, 119, 118), heads, "slug")
+    first = s.split("\\endfirsthead")[0]
+    assert "continued" not in first

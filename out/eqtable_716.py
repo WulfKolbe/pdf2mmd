@@ -638,6 +638,31 @@ def cell(body: str, env: str = "") -> str:
             "(will not typeset)}" % rt.esc_source(body))
 
 
+def table_open(caption: str, widths, heads, banner: str) -> str:
+    r"""`rt.table_open`, with the DOCUMENT NAME on every page it runs onto.
+
+    765 -- wzlxjtu-031's table starts at the foot of one page with two rows
+    on it and continues at the top of the next with fifteen. `longtable`
+    repeats the column header there and nothing else, so the fifteen rows sat
+    under `No | gold | MathPix | pdf2mmd` with no document name anywhere on
+    the page -- and the two rows left behind under the heading read as the
+    whole of it. Reported as "file 31 has no entries at all", which is what
+    it looks like.
+
+    A `\endfirsthead` carries the head as it was; `\endhead` gets a banner
+    row above it saying which document this is and that it is a continuation.
+    """
+    s = rt.table_open(caption, widths, False, False, heads=heads)
+    pre, sep, rest = s.partition("\\endhead\n")
+    if not sep:                        # the shared helper changed shape
+        return s
+    cont = ("\\hline\n\\multicolumn{%d}{|l|}{\\textbf{%s — continued}}"
+            " \\\\\n\\hline\n" % (len(widths), banner)
+            + " & ".join("\\textbf{%s}" % h for h in heads)
+            + " \\\\\n\\hline\n")
+    return pre + "\\endfirsthead\n" + cont + "\\endhead\n" + rest
+
+
 def provenance() -> str:
     """Which reader produced the pdf2mmd column, and when this was built.
 
@@ -732,7 +757,7 @@ def main():
                       sum(1 for x in m_at if x is not None),
                       sum(1 for x in p_at if x is not None),
                       len(m_left), len(p_left)))
-        parts.append(rt.table_open(caption, widths, False, False, heads=heads))
+        parts.append(table_open(caption, widths, heads, rt.esc_text(slug)))
         NOMATCH = r"{\itshape\footnotesize no match}"
         m_inline = inline_math(d / (slug + ".md"))
         p_inline = inline_math(d / "pdf2mmd" / "page.md")
@@ -816,10 +841,11 @@ def main():
         if not A.no_unmatched and (m_left or p_left):
             # the caption goes through `table_open`, which puts it in a
             # `\section*`; passing "" left an EMPTY heading on the page.
-            parts.append(rt.table_open(
+            parts.append(table_open(
                 "%s — blocks matching no gold equation: MathPix %d, pdf2mmd %d"
                 % (rt.esc_text(slug), len(m_left), len(p_left)),
-                widths, False, False, heads=heads))
+                widths, heads,
+                "%s — blocks matching no gold equation" % rt.esc_text(slug)))
             UNM = r"{\itshape\footnotesize no gold}"
             for j in m_left:
                 parts.append(" & ".join(["--", UNM, cell(mpx[j]), "--"])
