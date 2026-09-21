@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass
 
 import docmodel_six as docmodel
+import structure
 import texmap
 from docmodel_six import GlyphNode, LineNode, PageNode
 
@@ -351,6 +352,16 @@ def equation_number(line, right: float) -> list:
                 key=lambda g: g.rect[0])
     if len(gs) < 3:
         return []
+    # A LINE THAT IS NOTHING BUT THE NUMBER. The scan below walks back from
+    # the end and stops at index 1, so it can only find a tag that has
+    # mathematics before it ON THE SAME LINE. A display set on its own line
+    # puts its number on a line of its own -- wzlxjtu-031 sets `(1)` at
+    # x=286 with nothing else -- and that was never recognised, so it
+    # reached the document as the stray text `(1)` after the equation.
+    whole = "".join(g.text for g in gs).strip()
+    if _EQ_TAG.match(whole) and gs[-1].rect[2] >= right - 2.0 * max(
+            (g.size for g in gs), default=10.0):
+        return list(gs)
     size = max(g.size for g in gs)
     for i in range(len(gs) - 1, 0, -1):
         run = gs[i:]
@@ -358,10 +369,105 @@ def equation_number(line, right: float) -> list:
             continue
         if run[-1].rect[2] < right - 2.0 * size:
             return []                        # not at the margin
-        if run[0].rect[0] - gs[i - 1].rect[2] < 3.0 * size:
+        gap = run[0].rect[0] - gs[i - 1].rect[2]
+        # 739 — a number set FLUSH to the margin needs less of a gap.
+        #
+        # The three-em gap is the trailing space of a display equation, and a
+        # wide display does not have it: wzlxjtu-068's fourth equation ends
+        # `\Bigr)` at 541.5 and sets `(4)` from 551.4 to 563.0, the margin
+        # exactly -- a 10.0pt gap against a 29.9pt test, so the tag was read
+        # as mathematics and printed as `\Bigr)(4)`.
+        #
+        # What the gap rule protects against is a genuine `f(4)` at the end of
+        # an expression, and there the `(` follows its function name with no
+        # gap at all. So a run that ENDS ON the margin is accepted on a much
+        # smaller separation; one that merely ends near it still needs three.
+        # What the gap protects against is `f(1)`, a function APPLICATION, and
+        # there the thing before the bracket is a NAME. `y(1)` must stay
+        # mathematics however wide the gap; `\Bigr)(4)` cannot be an
+        # application, because the expression has already closed.
+        #
+        # Gap alone cannot separate the two: wzlxjtu-068's real tag sits 10.0pt
+        # (1.0 em) from the `\Bigr)` before it, while the synthetic `y(1)`
+        # this file tests with sits 13pt from its `y`. The glyph before the
+        # gap is what differs, and it is the thing to test.
+        prev = gs[i - 1]
+        applies = (prev.text or "").strip().isalpha()
+        flush = run[-1].rect[2] >= right - 0.5 * size
+        if gap < (0.6 * size if (flush and not applies) else 3.0 * size):
             return []                        # not separated from the maths
         return run
     return []
+
+
+_OPS_CHARS = re.compile(r"[-+=<>/(){}\[\],.;:|*!'\d\s]")
+
+
+def _fusable(text: str) -> bool:
+    r"""Is this text piece part of the FORMULA either side of it?
+
+    Operators, digits and punctuation are -- the display path already folds
+    those. So is a LONE LETTER: a variable set in the roman font, which is how
+    `= (x` came to sit between two maths spans in wzlxjtu-071 while being part
+    of `\Delta_x = (x - T_{0n})^	op ...`.
+    
+    A WORD is not, however short. The test is that no run of letters is longer
+    than one: `x` fuses, `as` does not, and prose can never be swallowed.
+    """
+    if not text.strip():
+        return False
+    rest = _OPS_CHARS.sub(" ", text)
+    return all(len(w) == 1 and w.isalpha() for w in rest.split())
+
+
+def _join_inline(parts: list) -> str:
+    r"""Join a line's pieces, FUSING maths separated only by operators.
+
+    One formula reaches this as several spans, because the roman font supplies
+    its `=`, its parentheses, its digits and sometimes a variable. Emitted
+    piece by piece, `\Delta_x = (x - T_{0n})^\top C_{0n}^{-1}(x - T_{0n})`
+    came out of wzlxjtu-071 as
+
+        $\Delta_{x}$ = (x $- \mathrm{T}_{0\mathrm{n}} )^{\top} ... $
+
+    -- `$...$`, prose, `$...$` -- which a renderer sets in two styles and a
+    reader cannot select as one expression.
+
+    The display path already folds an operator-only run into the mathematics
+    around it; this is the same rule for inline. The separator may be SEVERAL
+    pieces (`=` and `(x` arrive apart), so the run between two maths spans is
+    taken whole and fused only if every piece of it is fusable.
+    """
+    parts = [x for x in parts if x]
+    out: list[str] = []
+    i = 0
+
+    def ismath(s):
+        return s.startswith("$") and s.endswith("$") and len(s) > 2
+
+    while i < len(parts):
+        cur = parts[i]
+        if not ismath(cur):
+            out.append(cur)
+            i += 1
+            continue
+        body = cur[1:-1].strip()
+        j = i + 1
+        while j < len(parts):
+            k = j
+            while k < len(parts) and not ismath(parts[k]):
+                k += 1
+            if k >= len(parts):
+                break
+            gap = parts[j:k]
+            if gap and not all(_fusable(g) for g in gap):
+                break
+            body = " ".join([body] + [g.strip() for g in gap]
+                            + [parts[k][1:-1].strip()])
+            j = k + 1
+        out.append("$%s$" % body)
+        i = j
+    return " ".join(out)
 
 
 def _inline(tex: str | None) -> str:
@@ -397,7 +503,119 @@ def _left_margin(page: PageNode) -> float:
     return float(edges.most_common(1)[0][0]) if edges else page.rect[0]
 
 
-def is_display(ln: LineNode, left: float) -> bool:
+def columns(page: PageNode) -> list:
+    """The (left, right) bounds of each text column on this page.
+
+    746 — A MARGIN IS A COLUMN'S PROPERTY, NOT A PAGE'S.
+    `_left_margin` takes the mode of every line start and `_right_margin` the
+    page-wide maximum, which are the same thing only on a one-column page.
+    wzlxjtu-031 is two columns:
+
+        left  column   starts  54, ends ~300   (28 lines)
+        right column   starts 320, ends ~562   (24 lines)
+
+    so the page margin came out 54 -- the LEFT column's, because it has more
+    lines -- and every right-column line counted as "indented past the body
+    margin" by 266pt, the test `is_display` uses to find a display equation.
+    The right margin came out 562, so a LEFT-column equation number ending at
+    300 was never flush to it and was read as mathematics instead of stripped.
+
+    Columns are found by a gap in the sorted line starts wider than a line of
+    text is tall; a one-column page yields one column and behaves exactly as
+    before. Verified: wzlxjtu-031 and -033 give [(54,297),(317,562)], and
+    -006, -014, -072 give a single column. 11 of the 102 documents are
+    multi-column.
+
+    WHAT THIS IS AND IS NOT WIRED INTO, with the numbers.
+    The RIGHT bound is used for equation numbers, where it is correct and
+    measured NEUTRAL -- no tag in a two-column document was being missed.
+    The LEFT bound is NOT used by `is_display`, and that is a measurement,
+    not an oversight:
+
+        page-wide left   multi-column docs: 50 of 73 equations found
+        per-column left  multi-column docs: 48 of 73   (wzlxjtu-031 +1,
+                                                        others -3)
+
+    `is_display` asks whether a line is indented past the body margin. With
+    the page-wide margin every right-column line clears it by 266pt -- wrong
+    in principle, and accidentally permissive in exactly the way a display in
+    a narrow column needs, because such a display is often barely indented
+    within its own column. Replacing it with the true column margin makes the
+    test correct and the reading worse.
+    
+    What a column needs instead is a different question: not "is it indented"
+    but "is it centred in its column" or "is it shorter than the column". That
+    is a new criterion, not a new margin, and it is why the text layout worked
+    in two columns while the equations did not.
+    """
+    lines = [ln for ln in page.lines if ln.glyphs and not ln.rotated]
+    if not lines:
+        return [(page.rect[0], page.rect[2])]
+    size = max((g.size for ln in lines for g in ln.glyphs), default=10.0)
+    starts = sorted(ln.rect[0] for ln in lines)
+    cuts = [0]
+    for i in range(1, len(starts)):
+        if starts[i] - starts[i - 1] > 8.0 * size:
+            cuts.append(i)
+    cuts.append(len(starts))
+    cols = []
+    for a, b in zip(cuts, cuts[1:]):
+        lo, hi = starts[a], starts[b - 1]
+        mine = [ln for ln in lines if lo - 1 <= ln.rect[0] <= hi + 1]
+        # A column is a BLOCK OF RUNNING TEXT, not any cluster of starts. Five
+        # lines at least -- a stray equation number at x=525 on a one-column
+        # page is three lines and was being called a column of its own.
+        if len(mine) < 5:
+            continue
+        starts_c = collections.Counter(round(ln.rect[0]) for ln in mine)
+        cols.append(float(starts_c.most_common(1)[0][0]))
+    # A column's right edge is bounded by the NEXT column's left. Taking it
+    # from the lines themselves cannot work on a mixed page: wzlxjtu-031 puts
+    # a full-width section above a two-column body, so its left-column lines
+    # end at 300 (17 of them) AND at 560 (42), and neither the mode nor the
+    # maximum is the column's margin.
+    right = max(ln.rect[2] for ln in lines)
+    cols.sort()
+    bounds = []
+    for i, lo in enumerate(cols):
+        hi = (cols[i + 1] - 2.0 * size) if i + 1 < len(cols) else right
+        bounds.append((lo, hi))
+    # Anything too narrow to be a text column is not one -- a run of equation
+    # numbers at the right margin clusters like a column and is 15pt wide.
+    page_w = page.rect[2] - page.rect[0]
+    bounds = [b for b in bounds if b[1] - b[0] >= 0.20 * page_w]
+    # And each column must hold a real share of the page's lines. Counting
+    # start-CLUSTERS was not enough: wzlxjtu-009 put 4 lines and -052 put 2
+    # in their supposed second column against 29 and 22 in the first, and
+    # treating those pages as two-column cost 3 equations.
+    bounds = [b for b in bounds
+              if sum(1 for ln in lines if b[0] - 1 <= ln.rect[0] <= b[1] + 1)
+              >= max(8, 0.15 * len(lines))]
+    if not bounds:
+        return [(_left_margin(page), _right_margin(page))]
+    return [(bounds[0][0], right)] if len(bounds) == 1 else bounds
+
+
+_CENTRED_OK = os.environ.get("PDF2MMD_CENTRED", "1") != "0"
+_COLS_CACHE: dict = {}
+
+
+def column_of(page: PageNode, ln: LineNode) -> tuple:
+    """The (left, right) bounds of the column this line sits in."""
+    ck = id(page)
+    cols = _COLS_CACHE.get(ck)
+    if cols is None:
+        cols = _COLS_CACHE[ck] = columns(page)
+    if len(cols) == 1:
+        return cols[0]
+    cx = 0.5 * (ln.rect[0] + ln.rect[2])
+    best = min(cols, key=lambda c: 0.0 if c[0] <= cx <= c[1]
+               else min(abs(cx - c[0]), abs(cx - c[1])))
+    return best
+
+
+def is_display(ln: LineNode, left: float,
+               right: float | None = None) -> bool:
     """True if this line is a displayed equation on its own.
 
     Two conditions, both needed. It must be INDENTED past the body margin,
@@ -408,8 +626,70 @@ def is_display(ln: LineNode, left: float) -> bool:
     if ln.rotated or not ln.glyphs:
         return False
     size = max(g.size for g in ln.glyphs)
-    if ln.rect[0] <= left + 1.2 * size:
-        return False
+    # 737 — the indent threshold, as a measured constant rather than a hair.
+    #
+    # wzlxjtu-006's second display begins with a `V` at x=86.2 on a page whose
+    # body margin is 72.0 and whose type is 12pt: indented 14.2pt against a
+    # test demanding more than 14.4. It failed by a TENTH OF A POINT, and a
+    # display equation that fails here is emitted as an inline `$...$` in the
+    # middle of the prose -- it does not become a crop, it does not appear in
+    # any equation list, it simply stops being an equation.
+    #
+    # Swept over the 102 documents: 1.2 -> 1.1 -> 1.0 leaves the equations
+    # delivered whole (41), the dialect-correct count (60) and the crops (418)
+    # all unchanged, and recovers 5 display blocks and 8 fractions. One quad
+    # of indent is the weakest claim that still separates a display from a
+    # paragraph.
+    #
+    # 748 — HALF A QUAD, now that the margin is the COLUMN's. A display is
+    # centred, so its indent is half the slack in its line, and in a 243pt
+    # revtex column that slack is small: wzlxjtu-033's right-column display
+    # starts at 326.4 against a column margin of 317.0 -- indented 9.4pt
+    # against a 9.96pt test. Nine lines across the four twocolumn documents
+    # failed by margins of that order, and none was gained.
+    #
+    # Safe at 0.5 because body text sits AT its column margin, indent zero,
+    # and `is_display` refuses prose regardless. Measured over the corpus
+    # with the per-column margin:
+    #
+    #     1.0 em   59 whole   82 correct   190 fractions
+    #     0.5 em   61 whole   84 correct   201 fractions
+    #
+    # and on the four `twocolumn` documents, 33 of 51 -> 35 of 51.
+    _IND = float(os.environ.get("PDF2MMD_INDENT", "0.5"))
+    if getattr(ln, "forced_display", False):
+        # 734 -- claimed by the continuation row below it. The prose test
+        # below still runs, so this promotes maths and never a sentence.
+        pass
+    elif ln.rect[0] <= left + _IND * size:
+        # 747 — OR CENTRED IN ITS COLUMN, which is what a display IS.
+        #
+        # Indentation is a one-column proxy for centring: with a wide text
+        # block, a centred equation starts well right of the margin. In a
+        # 243pt revtex column it need not, and the four twocolumn documents
+        # in this corpus (030-033) set every one of their 51 displays as a
+        # plain `equation` (23) or `align` (28) inside a column -- no
+        # `widetext`, no `strip`, no `figure*`, nothing full-width.
+        #
+        # Centring is measured with the equation NUMBER excluded, because the
+        # tag sits at the column's right margin and would make every numbered
+        # display look flush-right rather than centred.
+        if _CENTRED_OK and right is not None:
+            gs = [g for g in ln.glyphs if g.text.strip()]
+            tag = set(map(id, equation_number(ln, right)))
+            body = [g for g in gs if id(g) not in tag]
+            if not body:
+                return False
+            x0 = min(g.rect[0] for g in body)
+            x1 = max(g.rect[2] for g in body)
+            lgap, rgap = x0 - left, right - x1
+            if (lgap > 1.0 * size and rgap > 1.0 * size
+                    and abs(lgap - rgap) <= 0.5 * max(lgap, rgap)):
+                pass                       # centred: it is a display
+            else:
+                return False
+        else:
+            return False
     for sp in ln.spans:
         if sp.kind != "text":
             continue
@@ -798,6 +1078,156 @@ def _strip_gutter(glyphs, fence_size: float):
     return kept or glyphs
 
 
+#: 734 — A ROW THAT BEGINS WITH A BINARY OPERATOR IS A CONTINUATION.
+#:
+#: `is_display` judges one line at a time, and its test is INDENT. That works
+#: when every row of a display is indented, and a multi-row display is not
+#: obliged to be: an author who pulls the continuation left (wzlxjtu-043 sets
+#: `\hspace{-0.15cm}` on it) leaves the FIRST row barely indented and the
+#: SECOND row indented far more. Measured on that page, column margin 397px,
+#: 12pt type:
+#:
+#:     eq 1   row 1 x=427 (indent 30)   row 2 x=489    both display    correct
+#:     eq 2   row 1 x=409 (indent 12)   row 2 x=507    row 1 INLINE    wrong
+#:     eq 3   row 1 x=409 (indent 12)   row 2 x=507    row 1 INLINE    wrong
+#:
+#: The head of the equation -- the part carrying `\delta_1^c(0) =`, which is
+#: what names it -- was read CORRECTLY and then emitted as an inline `$...$`
+#: in the middle of the prose, while its own continuation stood beside it as
+#: a display. Nothing was lost; the equation was cut in half.
+#:
+#: The evidence that fixes it is not a threshold. A row beginning `-`, `+` or
+#: `=` CANNOT BEGIN AN EQUATION: a binary operator needs a left operand, and
+#: the only place that operand can be is the line above. So a recognised
+#: display row that starts with one claims the line above it, provided that
+#: line is maths and not prose and stands directly over it.
+#:
+#: Walked upward, so a display of three rows claims both.
+_CONTINUATION_HEAD = set("-+=<>±∓≤≥≈≡∼⩽⩾−")
+
+
+def _starts_with_binary_operator(ln: "LineNode") -> bool:
+    gs = [g for g in ln.glyphs if g.text and g.text.strip()]
+    if not gs:
+        return False
+    first = min(gs, key=lambda g: g.rect[0])
+    t = first.text.strip()
+    return len(t) == 1 and t in _CONTINUATION_HEAD
+
+
+def _is_prose(ln: "LineNode") -> bool:
+    for sp in ln.spans:
+        if sp.kind != "text":
+            continue
+        word = docmodel._run_text(sp.glyphs).strip()
+        if re.fullmatch(r"[(\[]?[\d.]+[)\]]?", word):
+            continue
+        if len(re.findall(r"[A-Za-z]", word)) > 3:
+            return True
+    return False
+
+
+def absorb_equation_numbers(page: PageNode) -> int:
+    r"""Join a line that is ONLY an equation number to the display it labels.
+
+    739 -- wzlxjtu-027 sets two numbered equations one under the other:
+
+        L3  y=387  x= 932..1123   \bar\psi_A = \psi_A^\dagger \gamma_7
+        L5  y=398  x=1823..1875   (1)
+        L4  y=566  x= 924..1131   (\gamma_7)^\dagger = -\gamma_7
+        L6  y=572  x=1823..1875   (2)
+
+    Each number is on its equation's own band -- 11px apart in 12pt type --
+    but 700px to the right of it, so band-building kept them as separate
+    lines. Everything downstream then read the page wrong in two ways at
+    once:
+
+      * L3 and L4 became ADJACENT DISPLAY LINES WITH NOTHING BETWEEN THEM,
+        so the run pass fused them into a single `aligned`. Two equations
+        became one.
+      * the numbers survived as lines of their own. `to_markdown` drops such
+        a line, so the number was LOST; `to_latex` had no such rule, so it
+        emitted `(1)` and `(2)` as loose prose after the two `equation`
+        environments -- the number printed twice, once by LaTeX and once as
+        text.
+
+    Rejoined here, before anything groups or emits, both follow: a display
+    carrying its own number cannot be a row of the one above it, and the
+    number is attached to the equation it belongs to rather than floating.
+
+    The test is deliberately narrow -- the line must be NOTHING but a number
+    by `equation_number`'s own reckoning (parenthesised, at the column's
+    right margin, behind a gap), it must overlap the display's vertical
+    band, and it must lie to its right.
+    """
+    lines = [ln for ln in page.lines if not ln.rotated and ln.glyphs]
+    joined = 0
+    for tagln in list(lines):
+        body = [g for g in tagln.glyphs if g.text.strip()]
+        if not body:
+            continue
+        tag = equation_number(tagln, column_of(page, tagln)[1])
+        if len(tag) != len(body):
+            continue                       # not a number on its own
+        mid = 0.5 * (tagln.rect[1] + tagln.rect[3])
+        host = None
+        for ln in lines:
+            if ln is tagln or not ln.glyphs:
+                continue
+            if ln.rect[2] > tagln.rect[0]:
+                continue                   # not to the left of the number
+            if not (ln.rect[1] <= mid <= ln.rect[3]):
+                continue                   # not on this band
+            if not any(sp.kind == "math" for sp in ln.spans):
+                continue
+            if host is None or ln.rect[2] > host.rect[2]:
+                host = ln                  # the nearest one to its left
+        if host is None:
+            continue
+        host.glyphs.extend(tagln.glyphs)
+        host.glyphs.sort(key=lambda g: g.rect[0])
+        host.rect = (host.rect[0], min(host.rect[1], tagln.rect[1]),
+                     max(host.rect[2], tagln.rect[2]),
+                     max(host.rect[3], tagln.rect[3]))
+        page.lines.remove(tagln)
+        lines.remove(tagln)
+        joined += 1
+    return joined
+
+
+def mark_display_continuations(page: PageNode) -> int:
+    """Promote the head of a display whose continuation was recognised alone.
+
+    Returns how many lines were promoted. Sets `forced_display` on the line,
+    which `is_display` accepts in place of the indent test -- the prose test
+    still runs, so a sentence is never promoted.
+    """
+    lines = [ln for ln in page.lines if not ln.rotated and ln.glyphs]
+    n = 0
+    for i, ln in enumerate(lines):
+        if i == 0 or not _starts_with_binary_operator(ln):
+            continue
+        if not is_display(ln, *column_of(page, ln)):
+            continue
+        j = i - 1
+        while j >= 0:
+            up = lines[j]
+            if not any(sp.kind == "math" for sp in up.spans) or _is_prose(up):
+                break
+            size = max(g.size for g in up.glyphs)
+            # directly above: the rows of one display share its leading
+            if up.rect[1] - ln.rect[3] > 1.5 * size:
+                break
+            if is_display(up, *column_of(page, up)):
+                break                      # already a display; nothing to do
+            up.forced_display = True
+            n += 1
+            if not _starts_with_binary_operator(up):
+                break                      # this one is the head
+            j -= 1
+    return n
+
+
 def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                 base: str = "http://localhost:8000",
                 px_per_pt: float = DEFAULT_PX_PER_PT,
@@ -807,8 +1237,35 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                 line_numbers: bool = True,
                 join_hyphens: bool = True) -> str:
     """Mathpix-flavoured Markdown: LaTeX where we have it, a crop where we don't."""
+    for _p in pages:
+        absorb_equation_numbers(_p)
+        mark_display_continuations(_p)
     fp = profile(pages)
     grouped = {p.page: g for p, g in _merge_heading_runs(pages, fp)}
+
+    # 750 — A LINE THAT IS NOTHING BUT AN EQUATION NUMBER LEAVES THE FLOW.
+    #
+    # The tag is a LABEL, not content, and the reader already strips one that
+    # shares a line with its mathematics. A display set on its own line puts
+    # its number on a line of its own, and that one survived: wzlxjtu-031
+    # reached the document as `$C = \sum ... V_{m}^{s}$` followed by a bare
+    # `(1)` -- correct mathematics with a stray number after it.
+    #
+    # Dropped here, before any emitter sees it, so the markdown and the LaTeX
+    # agree. 7 such lines on that page alone.
+    for _pg in pages:
+        kept = []
+        for lvl, group in grouped.get(_pg.page, []):
+            live = []
+            for ln in group:
+                body = [g for g in ln.glyphs if g.text.strip()]
+                tag = equation_number(ln, column_of(_pg, ln)[1])
+                if body and len(tag) == len(body):
+                    continue                  # the whole line is the number
+                live.append(ln)
+            if live:
+                kept.append((lvl, live))
+        grouped[_pg.page] = kept
     out: list[str] = []
     for p in pages:
         if page_separator:
@@ -925,7 +1382,8 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
         for gi, (lvl, group) in enumerate(grouped[p.page]):
             if not group:
                 continue
-            if not lvl and all(is_display(ln, left) for ln in group):
+            if not lvl and all(is_display(ln, *column_of(p, ln))
+                               for ln in group):
                 top = group[0].rect[3]
                 size = max((g.size for ln in group for g in ln.glyphs),
                            default=10.0)
@@ -937,6 +1395,16 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                     open_run = True
                 run_of[gi] = run_id
                 prev_bottom = group[-1].rect[1]
+                # 739 -- A DISPLAY THAT CARRIES ITS OWN NUMBER IS AN EQUATION,
+                # NOT A ROW. Two numbered equations set one under the other
+                # are adjacent display lines with nothing between them, and
+                # the run pass fused them into one `aligned` -- wzlxjtu-027
+                # turned its (1) and (2) into a single two-row block, and
+                # again its (5) and (6). A multi-row display carries ONE
+                # number for the whole thing, so a number ends the run.
+                if any(equation_number(ln, column_of(p, ln)[1])
+                       for ln in group):
+                    open_run = False
                 continue
             # Not a display. It ends the run only if it comes back to the
             # margin -- or is a heading, which always does.
@@ -996,7 +1464,7 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                             f"![{sp.id} {docmodel.span_reason(sp)}]({url})")
                     else:
                         parts.append(docmodel.span_text(sp))
-                chunks.append(" ".join(x for x in parts if x))
+                chunks.append(_join_inline(parts))
             # Rotated lines are excluded above, so a rotated group must not
             # qualify as verbatim either: a stamp whose font happens to
             # measure as monospace would otherwise be fenced back into the
@@ -1051,7 +1519,8 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                 continue
             displayable = (
                 not lvl
-                and all(is_display(ln, left) for ln in group)
+                and all(is_display(ln, *column_of(p, ln))
+                        for ln in group)
                 # Every maths span must actually project. A matrix is drawn
                 # as separate rows with extensible fences; each row satisfies
                 # "indented, no prose" and would become its own `$$` block of
@@ -1072,9 +1541,69 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                 # into `X^{-1} X a1...`.
                 pieces = []
                 tagged = {id(g) for ln in group
-                          for g in equation_number(ln, _right_margin(p))}
+                          for g in equation_number(ln, column_of(p, ln)[1])}
                 for ln in group:
-                    for sp in ln.spans:
+                    # 738 — A ROW WHOSE SPANS OVERLAP IN x CANNOT BE EMITTED
+                    # SPAN BY SPAN, in any order.
+                    #
+                    # Spans are concatenated here, which assumes they tile the
+                    # row left to right. They do not always: measured over the
+                    # corpus, of 169 display lines carrying more than one span,
+                    # 46 (27%) have their spans out of x order and 72 (43%)
+                    # have spans that OVERLAP. wzlxjtu-068's fourth display:
+                    #
+                    #   span 0  math  x=[321.9,329.1]  'C'
+                    #   span 1  text  x=[343.0,350.7]  '='
+                    #   span 2  math  x=[380.1,445.1]  '0,0225·(1−δt'
+                    #   span 3  text  x=[450.3,454.1]  ')'
+                    #   span 4  math  x=[329.8,545.0]  'tot ∑ t ( ( sc +δt'
+                    #
+                    # Span 4 spans the whole row and is emitted last, so the
+                    # sum and both big parens print AFTER the term they
+                    # enclose. Sorting the spans by x cannot fix it -- span 4
+                    # interleaves with every other span, which is what
+                    # "overlapping" means.
+                    #
+                    # The precedent is in `docmodel_six` for fractions: "A
+                    # line carrying a FRACTION cannot be segmented by x ...
+                    # keep the line whole and let the structure pass do the
+                    # splitting." An overlap says exactly the same thing, so
+                    # the whole row goes to `to_tex` as one group and the
+                    # ordering is decided there, by x, over all its glyphs.
+                    _sp = [s for s in ln.spans if s.glyphs]
+                    _xs = [(min(g.rect[0] for g in s.glyphs),
+                            max(g.rect[2] for g in s.glyphs)) for s in _sp]
+                    _ord = sorted(range(len(_sp)), key=lambda i: _xs[i][0])
+                    _overlap = any(_xs[_ord[i + 1]][0] < _xs[_ord[i]][1] - 1
+                                   for i in range(len(_ord) - 1))
+                    # A text span of pure operators and digits is already
+                    # folded into the mathematics below, so it is no reason to
+                    # refuse the whole-row path -- `=` and `)` were sitting in
+                    # text spans on the wzlxjtu-068 row and blocked it.
+                    def _foldable(s):
+                        if s.kind == "math":
+                            return True
+                        txt = docmodel._run_text(s.glyphs).strip()
+                        return (not txt or re.fullmatch(
+                            r"[-+=<>/(){}\[\],.;:|*!'\d\s]+", txt) is not None)
+
+                    if _overlap and all(_foldable(s) for s in _sp):
+                        keep = [g for s in _sp for g in s.glyphs
+                                if id(g) not in tagged]
+                        whole = structure.to_tex(
+                            sorted(keep, key=lambda g: g.rect[0]),
+                            list(ln.rules))
+                        if whole:
+                            pieces.append(whole)
+                            continue
+                    # Spans that do NOT overlap still have to be emitted
+                    # left to right, and they were emitted in creation order.
+                    # 46 of 169 multi-span display rows are out of x order.
+                    # wzlxjtu-069's third display put `\min_{H\in\mathcal{H}
+                    # (x)}` after the closing full stop -- every element
+                    # present, the order wrong -- because the operator and its
+                    # stacked subscript are built as a later span.
+                    for sp in ([_sp[i] for i in _ord] if _sp else ln.spans):
                         if sp.glyphs and all(id(g) in tagged
                                              for g in sp.glyphs
                                              if g.text.strip()):
@@ -1097,11 +1626,30 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                 # parenthesised number, at the right margin, behind a gap of
                 # more than three em -- and only when it is what the text
                 # actually ends with.
+                _tag = ""
                 for ln in group:
                     tag = "".join(g.text for g in equation_number(
-                        ln, _right_margin(p))).strip()
+                        ln, column_of(p, ln)[1])).strip()
                     if tag and inner.rstrip().endswith(tag):
                         inner = inner.rstrip()[:-len(tag)].rstrip()
+                    _tag = _tag or tag
+                # 739 -- AND PUT IT BACK, AS `\tag`.
+                #
+                # The two projections need OPPOSITE things from the number
+                # and were both doing the same thing with it. LaTeX numbers
+                # an `equation` itself, so the page's own `(1)` must go --
+                # printed as well it appears twice, with different values.
+                # MARKDOWN NUMBERS NOTHING, so dropping it loses the label
+                # the surrounding prose refers to: "substituting (3) into
+                # (4)" with no (3) and no (4) anywhere on the page.
+                #
+                # `\tag{1}` is the one spelling that says "this equation is
+                # numbered 1" without claiming to have counted it, and both
+                # KaTeX and MathJax set it. MathPix emits no tag at all --
+                # zero `\tag` over the whole corpus -- so this is a place
+                # the projection can carry more than its reference does.
+                if _tag:
+                    inner = inner.rstrip() + r" \tag{%s}" % _tag.strip("()")
                 extras = ""
                 # A display block must SAY something. `$$ $$` and
                 # `$$\bigr)$$` are not equations; they were 55 empty and
@@ -1278,6 +1826,23 @@ def _escape_tex(t: str) -> str:
     return "".join(_TEX_SPECIAL.get(c, c) for c in t)
 
 
+def _flush_eq(out: list, rows: list) -> None:
+    r"""Emit the rows collected for one display as a single environment."""
+    if not rows:
+        return
+    if len(rows) == 1:
+        out.append(r"\begin{equation}")
+        out.append(rows[0])
+        out.append(r"\end{equation}")
+    else:
+        out.append(r"\begin{equation}")
+        out.append(r"\begin{aligned}")
+        out.append(" \\\\\n".join(rows))
+        out.append(r"\end{aligned}")
+        out.append(r"\end{equation}")
+    rows.clear()
+
+
 def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
              base: str = "http://localhost:8000",
              px_per_pt: float = DEFAULT_PX_PER_PT,
@@ -1290,16 +1855,39 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
     says which package defines it -- the glyph/package correlation Mathpix
     did not keep. A document with no fraktur does not load amsfonts.
     """
+    for _p in pages:
+        absorb_equation_numbers(_p)
+        mark_display_continuations(_p)
     fp = profile(pages)
     sect = {1: "section", 2: "subsection", 3: "subsubsection"}
     out: list[str] = []
+    pending: list[str] = []
+    prev_bottom = None
     for p in pages:
         out.append(f"% ---- page {p.page} ----")
         out.append(r"\newpage")
         for ln in p.lines:
             lvl = heading_level(ln, fp)
             parts: list[str] = []
+            raw: list[str] = []          # the same maths, without the `$`
+            only_math = True
+            # 739 -- THE NUMBER IS LaTeX'S TO PRINT, NOT OURS.
+            #
+            # `\begin{equation}` numbers the equation itself, so emitting the
+            # page's own `(1)` puts the number in TWICE -- once as text and
+            # once by LaTeX, with different values. The markdown path drops
+            # the tag glyphs like this and the .tex path never did: a bare
+            # `(1)` matches the "operators and numbers" test below, so it was
+            # appended to the display body and came out inside the equation.
+            #
+            # The MARKDOWN does the opposite and shows it, because markdown
+            # has no numbering of its own -- see `_tag_of` at the emitter.
+            _tagged = {id(g) for g in
+                       equation_number(ln, column_of(p, ln)[1])}
             for sp in ln.spans:
+                if sp.glyphs and all(id(g) in _tagged for g in sp.glyphs
+                                     if g.text.strip()):
+                    continue
                 if sp.kind == "text":
                     txt = _escape_tex(
                         docmodel._run_text(sp.glyphs, sp.word_gap))
@@ -1315,11 +1903,28 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
                         txt = (rf"\colorbox[rgb]{{{_tex_color(back)}}}"
                                rf"{{{txt}}}")
                     parts.append(txt)
+                    if txt.strip():
+                        # an operator or number between maths spans is part
+                        # of the display; a word is not
+                        if re.fullmatch(r"[-+=<>/(){}\[\],.;:|*!'\d\s]+",
+                                        docmodel._run_text(sp.glyphs).strip()):
+                            raw.append(docmodel._run_text(sp.glyphs).strip())
+                        else:
+                            only_math = False
                     continue
                 tex = docmodel.span_latex(sp)
                 if tex is not None and is_emittable(tex):
-                    parts.append(f"${tex}$")
+                    # The same hazard the markdown path was given in 738, and
+                    # the .tex path never got: a span is a FRAGMENT of a line,
+                    # so a `\left` whose partner lives in the next span reaches
+                    # the document alone. Measured over the 102 page files, 2
+                    # of them failed to compile on exactly this --
+                    # `$\left[ \tanh\!\Bigl($` opening on one line and
+                    # `$\right]$` closing four lines later.
+                    parts.append(f"${balance_delims(tex)}$")
+                    raw.append(balance_delims(tex))
                 else:
+                    only_math = False
                     url = crop_url(sp.rect, p, doc_id, base, px_per_pt)
                     parts.append(
                         "\n".join([
@@ -1330,24 +1935,109 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
                         ])
                     )
             body = " ".join(x for x in parts if x)
+            # 751 — THE LaTeX PROJECTION HAD NO DISPLAY EQUATIONS AT ALL.
+            #
+            # Every maths span was emitted as inline `$...$`, so a page whose
+            # markdown carries 11 `$$` blocks produced a `.tex` with ZERO
+            # display environments -- wzlxjtu-031's first equation reached the
+            # file as `$C = \sum ... V_{m}^{s}$` in the middle of a paragraph,
+            # with its `(1)` beside it.
+            #
+            # Markdown cannot express much more than `$$`; LaTeX can say
+            # exactly what the page shows, and this is the projection that
+            # should. The SAME display test the markdown uses decides it, so
+            # the two agree on what a display is.
+            if (not lvl and body.strip()
+                    and is_display(ln, *column_of(p, ln))):
+                # Built from the RAW maths, not by unwrapping the joined
+                # string: a display line is usually several spans, so the
+                # joined body carries several `$...$` and cannot simply
+                # have its delimiters stripped.
+                if only_math and raw:
+                    # ROWS OF ONE DISPLAY STAY ONE DISPLAY. Emitting an
+                    # `equation` per LINE turned wzlxjtu-009's three-row
+                    # `S_{AB}/N_{AB}/M^I_{AB}` into three separately numbered
+                    # equations, where the markdown keeps it as one `aligned`.
+                    # Consecutive display lines with nothing between them and
+                    # no vertical gap are rows of the same display.
+                    size = max((g.size for g in ln.glyphs), default=10.0)
+                    if (pending and prev_bottom is not None
+                            and prev_bottom - ln.rect[3] <= 1.5 * size):
+                        pending.append(" ".join(raw))
+                    else:
+                        _flush_eq(out, pending)
+                        pending = [" ".join(raw)]
+                    prev_bottom = ln.rect[1]
+                    continue
+            _flush_eq(out, pending)
+            pending = []
             if lvl:
                 out.append(rf"\{sect[lvl]}{{{body}}}")
             else:
                 out.append(body)
+        _flush_eq(out, pending)
+        pending = []
         out.append("")
     body = "\n".join(out)
     if not preamble:
         return body
 
     import texpackages
+    # A Private Use codepoint is a FONT'S INTERNAL SLOT, not a character: the
+    # PDF's ToUnicode said this glyph has no Unicode. No font outside that
+    # document has it, so it sets nothing and LaTeX only warns -- the
+    # character disappears from the output and nothing says so. Removed here
+    # and named in the preamble instead. (HSVA-100jahre, U+F075.)
+    body, private = texpackages.strip_private_use(body)
     pkgs = texpackages.packages_for(body)
     if "\\includegraphics" in body and "graphicx" not in pkgs:
         pkgs.append("graphicx")
+    # `max width=` is ADJUSTBOX's key, exported into `\includegraphics` by its
+    # `export` option -- plain graphicx does not define it, and every crop
+    # emitted here uses it:
+    #
+    #     ! Package keyval Error: max width undefined.
+    #
+    # Found only by running PDFs from outside the test corpus, because the
+    # corpus `.tex` files have their `\includegraphics` lines commented out
+    # for inspection and never reached the key. 13 of 18 outside documents
+    # failed on it.
+    if "max width" in body and "adjustbox" not in pkgs:
+        pkgs.append("adjustbox")
+    # `[H]` is the `float` package's placement, not LaTeX's own. Every crop is
+    # emitted as `\begin{figure}[H]`, so a page carrying one failed to compile
+    # with "! LaTeX Error: Unknown float option `H'" -- recoverable, so a PDF
+    # still appeared, which is why it went unnoticed. Declared where it is
+    # used, on the same condition.
+    if "[H]" in body and "float" not in pkgs:
+        pkgs.append("float")
     if unicode_fonts:
         pkgs.append("fontspec")
+    # Characters the text font does not have. Prose does not go through
+    # `texmap` -- a glyph the PDF names is written out as itself and is
+    # DROPPED WITH A WARNING if the font lacks it, which no one reads.
+    uni_lines, uni_pkgs, uni_lost = texpackages.unicode_decls(body)
+    for name in uni_pkgs:
+        if name not in pkgs:
+            pkgs.append(name)
     unknown = texpackages.unknown_commands(body)
 
-    head = [r"\documentclass{article}"]
+    # 749 — `twocolumn` WHEN THE PAGE IS TWO COLUMNS.
+    #
+    # The layout is measured, not guessed: `columns()` finds the text columns
+    # on each page and the four documents that declare
+    # `\documentclass[twocolumn]{revtex...}` are exactly the ones it reports
+    # as two-column. Markdown has no way to say this; LaTeX does, and the
+    # `.tex` output is the projection that can carry it.
+    #
+    # NOT a reconstruction of the author's preamble -- nothing here knows
+    # what class or packages the author loaded, and the docmodel does not
+    # keep one (its `latex`/`latex_original` pair is macro expansion, which
+    # exists precisely so that no author preamble is needed). This is what
+    # the PAGE shows, written in the only place that can express it.
+    twocol = any(len(columns(p)) > 1 for p in pages)
+    head = [r"\documentclass[twocolumn]{article}" if twocol
+            else r"\documentclass{article}"]
     for name in pkgs:
         if name == "fontspec":
             # [no-math] so fontspec leaves the maths fonts alone: the symbols
@@ -1355,14 +2045,33 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
             # fonts, and letting fontspec substitute would change them.
             head.append(r"\usepackage[no-math]{fontspec}")
         else:
-            head.append(rf"\usepackage{{{name}}}")
+            head.append(r"\usepackage[export]{adjustbox}" if name == "adjustbox"
+                        else rf"\usepackage{{{name}}}")
+    head += uni_lines
     head += texpackages.provides_for(body)
+    if uni_lost:
+        head.append("% WARNING: no translation for, and no font here sets: "
+                    + " ".join("U+%04X %s" % (ord(c), c) for c in uni_lost)[:400])
+    if private:
+        head.append("%% WARNING: %d private-use codepoint(s) removed (a font's "
+                    "own slot, not a character): %s"
+                    % (len(private),
+                       " ".join(sorted({"U+%04X" % ord(c) for c in private}))[:200]))
     if unknown:
         # Surfaced, not shipped: Mathpix output that will not compile is the
         # failure this exists to avoid.
         head.append("% WARNING: commands with no known package: "
                     + " ".join(sorted(r"\\" + u for u in unknown))[:400])
     head.append(r"\begin{document}")
+    # A document whose body is only `\newpage` compiles to NOTHING: xelatex
+    # says "No pages of output", which reads as a LaTeX fault rather than as
+    # "this PDF had no text". Say it on the page instead. (733.)
+    if not re.search(r"[^\s\\]", re.sub(r"(?m)^\s*%.*$", "",
+                                    re.sub(r"\\newpage|\\clearpage", "", body))):
+        body += ("\n\\textbf{No text was read from this PDF.} It has no text "
+                 "layer on the pages converted, so there was nothing for a "
+                 "glyph reader to project: the page is an image and needs "
+                 "OCR.\n")
     return "\n".join(head) + "\n" + body + "\n" + r"\end{document}" + "\n"
 
 

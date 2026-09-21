@@ -1131,3 +1131,93 @@ class TestDisplayRunsDecidedInOnePass:
         pg = self._page([(200.0, 700.0, "ab", 12.0),
                          (200.0, 701.0, "cd", 8.0)])
         assert "\x00" not in M.to_markdown([pg], doc_id="t")
+
+
+def test_private_use_warning_is_formattable():
+    """733 -- the warning line itself was a `%` format string beginning `% W`,
+    so emitting it raised `unsupported format character 'W'` and the whole
+    document failed to project. Caught by a run outside the corpus, not by a
+    test: nothing here had ever produced a private-use codepoint."""
+    import project_mmd
+    import texpackages
+    body = "Windkanal  text"
+    stripped, private = texpackages.strip_private_use(body)
+    assert private
+    # the exact expression to_latex builds
+    line = ("%% WARNING: %d private-use codepoint(s) removed (a font's "
+            "own slot, not a character): %s"
+            % (len(private),
+               " ".join(sorted({"U+%04X" % ord(c) for c in private}))[:200]))
+    assert line.startswith("% WARNING: 1 private-use")
+    assert "U+E000" in line
+
+
+def test_a_pdf_with_no_text_says_so_on_the_page():
+    """733 -- a body of only `\\newpage` compiles to "No pages of output",
+    which reads as a LaTeX fault and not as "nothing was extracted"."""
+    import project_mmd
+    out = project_mmd.to_latex([], doc_id="empty")
+    assert "No text was read" in out
+    assert r"\begin{document}" in out
+
+
+def test_a_document_with_text_gets_no_such_note():
+    import project_mmd
+    from docmodel_six import PageNode
+    out = project_mmd.to_latex([], doc_id="x")
+    assert out.count("No text was read") == 1
+
+
+class TestDisplayContinuation:
+    r"""734 -- a row beginning with a binary operator is a CONTINUATION.
+
+    `is_display` judges one line at a time and its test is INDENT. A
+    multi-row display is not obliged to indent every row equally: in
+    wzlxjtu-043 the author pulls the continuation left (`\hspace{-0.15cm}`),
+    which leaves the FIRST row indented 12px against a 0.5 em test and the
+    SECOND indented 110px. The head of the equation -- the part carrying
+    `\delta_1^c(0) =`, which is what names it -- was read correctly and then
+    emitted as an inline `$...$` beside its own display.
+
+    A binary operator needs a left operand, and the only place it can be is
+    the line above.
+    """
+
+    def _mathline(self, lid, x0, baseline, texts):
+        import docmodel_six as D
+        import texmap
+        size = 12.0
+        gl, x = [], x0
+        for t in texts:
+            gl.append(D.GlyphNode(
+                id=f"{lid}g{x}", page=1, rect=(x, baseline, x + 6.0,
+                                               baseline + size),
+                text=t, cid=0, glyphname=None, fontname="ABC+CMMI12",
+                family="math-italic", size=size,
+                tex=texmap.TexToken(t, "atom", None, "corpus"),
+                matrix=(size, 0, 0, size, x, baseline)))
+            x += 8.0
+        ln = D.LineNode(id=lid, page=1, rect=(x0, baseline, x, baseline + size),
+                        type="formula", glyphs=gl)
+        return ln
+
+    def _page(self):
+        import docmodel_six as D
+        # body text fixing the column margin at x=100, then the two rows of
+        # one display: the head barely indented, the continuation far more.
+        head = self._mathline("p1l1", 104.0, 600.0, list("y=a"))
+        cont = self._mathline("p1l2", 140.0, 580.0, list("-b"))
+        return D.PageNode(page=1, rect=(0.0, 0.0, 612.0, 792.0),
+                          lines=[head, cont]), head, cont
+
+    def test_the_head_is_claimed_by_its_continuation(self):
+        page, head, cont = self._page()
+        assert M.mark_display_continuations(page) == 1
+        assert getattr(head, "forced_display", False) is True
+
+    def test_a_row_that_does_not_start_with_an_operator_claims_nothing(self):
+        page, head, cont = self._page()
+        for g in cont.glyphs[:1]:
+            g.text = "z"
+        assert M.mark_display_continuations(page) == 0
+        assert getattr(head, "forced_display", False) is False

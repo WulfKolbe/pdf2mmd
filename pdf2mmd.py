@@ -152,6 +152,27 @@ def main(argv=None) -> int:
         lines.append(f"  {v:6d}  {100.0 * v / m if m else 0:5.1f}%  {k}")
     if ocr:
         lines += ["", f"OCR-layer pages skipped: {ocr}"]
+
+    # 733 -- A PDF THIS READER CANNOT READ MUST NOT LOOK LIKE A SUCCESS.
+    #
+    # `~/Gemma4/test.pdf` produced `glyphs 0, lines 0`, an exit status of 0
+    # and no message at all; the `.tex` was `\documentclass{article}` around a
+    # bare `\newpage`, and xelatex answered "No pages of output" -- which
+    # reads as a LaTeX fault rather than as "nothing was extracted". Found by
+    # running PDFs from outside the corpus.
+    #
+    # Zero glyphs is not a hard case, it is a DIFFERENT KIND OF DOCUMENT: no
+    # text layer, so the page is an image and belongs to OCR, not to a glyph
+    # reader. Named, and the status says so.
+    empty = stats["glyphs"] == 0
+    if empty:
+        lines += ["",
+                  "NO TEXT WAS READ.",
+                  "  This PDF has no text layer on the pages requested: every",
+                  "  glyph count is zero, so there is nothing for a glyph",
+                  "  reader to project. The page is an image (a scan, or a",
+                  "  figure exported as a whole) and needs OCR instead.",
+                  "  Exit status 2."]
     report = "\n".join(lines) + "\n"
     with open(base + ".report.txt", "w", encoding="utf-8") as fh:
         fh.write(report)
@@ -160,6 +181,11 @@ def main(argv=None) -> int:
         print(report, file=sys.stderr)
         say(f"  wrote {base}.md/.tex/.lines.json/.fonts.md/.report.txt"
             f", model.docmodel.json and {base}.equations.json")
+    if empty:
+        print("pdf2mmd: NO TEXT WAS READ from %s -- no text layer on pages "
+              "%d-%d; this is a scan or an image-only page and needs OCR."
+              % (args.pdf, rng.start + 1, rng.stop), file=sys.stderr)
+        return 2
     return 0
 
 

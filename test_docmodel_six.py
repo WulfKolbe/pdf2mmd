@@ -1945,3 +1945,46 @@ class TestStreamLineMerge:
         rows = [self._row(700.0, x0=200.0), self._row(706.0, x0=100.0)]
         out = _merge_stream_lines(rows, [690.0])[0]
         assert [gg.rect[0] for gg in out] == sorted(gg.rect[0] for gg in out)
+
+
+class TestAWideFractionBar:
+    r"""735 -- TeX sets the fraction rule as wide as the WIDER of numerator
+    and denominator, so a long denominator makes a long bar. The guard that
+    stops a code listing's border being read as a fraction was an em count,
+    `> 12 em`, and wzlxjtu-045's
+
+        \frac{1}{\sum_{i=1}^{n} I\{D_i=1, M_i=0, T_i=1\}}
+
+    sets a 160.2pt bar in 12pt type -- 13.35 em. It failed by 16pt, was
+    called a separator, and with no bar there is no fraction: the numerator,
+    the denominator and the head of the equation stayed three separate bands
+    and one two-row display came apart into nine pieces.
+
+    A listing border is told from a fraction bar by the same rule TeX drew it
+    with: one of the two groups REACHES BOTH ENDS of the bar. Code inside a
+    frame is inset from both margins and reaches neither.
+    """
+
+    def _rule(self, x0, x1, y):
+        from docmodel_six import RuleNode
+        return RuleNode(id="r", page=1, rect=(x0, y, x1, y))
+
+    def _row(self, baseline, x0, x1, size=12.0, n=20):
+        step = (x1 - x0) / max(n - 1, 1)
+        return [g(None, family="math-italic", size=size, baseline=baseline,
+                  x=x0 + i * step, text="o") for i in range(n)]
+
+    def test_a_long_denominator_still_makes_a_fraction(self):
+        from docmodel_six import _rule_role
+        bar = self._rule(188.4, 348.7, 672.6)        # 160.2pt, 13.35 em
+        num = self._row(677.2, 265.0, 272.0, n=1)    # a lone `1`, centred
+        den = self._row(663.0, 188.4, 348.7)         # reaches both ends
+        assert _rule_role(bar, num + den, 12.0) == "fraction"
+
+    def test_a_listing_border_is_still_a_separator(self):
+        from docmodel_six import _rule_role
+        # the frame runs the block; the code inside is inset from both margins
+        bar = self._rule(85.0, 510.0, 672.6)
+        above = self._row(677.2, 110.0, 300.0)
+        below = self._row(663.0, 110.0, 280.0)
+        assert _rule_role(bar, above + below, 12.0) == "separator"

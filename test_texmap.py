@@ -7,6 +7,7 @@ assert behaviour.
 
 import pytest
 
+import texmap
 from texmap import UNKNOWN, project
 
 
@@ -698,3 +699,84 @@ class TestFontsWithNoEncoding:
         from texmap import family_of
         assert family_of("ABC+TeX-matha10") == "math-symbol"
         assert family_of("ABC+TeX-mathx10") == "math-extension"
+
+
+class TestLimitPlacementIsATable:
+    """Which operators take limits is DECLARED, never inferred.
+
+    The table is amsopn.sty's own: `\\qopname\\relax m{...}` for movable
+    limits, `o{...}` for ordinary. It is here as a test because the wrong
+    half of it is plausible -- `\\dim`, `\\ker`, `\\deg`, `\\hom` and `\\arg`
+    are short upright operator names that take a subscript, exactly like
+    `\\max`, and LaTeX puts their scripts BESIDE them. Reading them as limit
+    operators makes a pass claim the preceding term's scripts.
+    """
+
+    def test_the_movable_limit_operators(self):
+        for name in ("max", "min", "sup", "inf", "lim", "liminf", "limsup",
+                     "det", "gcd", "Pr", "injlim", "projlim", "varlimsup"):
+            assert texmap.takes_limits("\\\\" + name), name
+
+    def test_the_ones_that_only_look_like_them(self):
+        for name in ("dim", "hom", "ker", "deg", "arg"):
+            assert not texmap.takes_limits("\\\\" + name), name
+
+    def test_ordinary_function_names_never_take_limits(self):
+        for name in ("sin", "cos", "tan", "log", "ln", "exp", "tanh", "sinh"):
+            assert not texmap.takes_limits("\\\\" + name), name
+
+    def test_sum_class_takes_limits_only_in_DISPLAY_size(self):
+        assert texmap.takes_limits(None, "summationdisplay")
+        assert texmap.takes_limits(None, "productdisplay")
+        # the same operator set in text style puts its limits beside it
+        assert not texmap.takes_limits(None, "summationtext")
+
+    def test_integrals_do_NOT_take_limits_above_and_below(self):
+        """`\\int` is \\nolimits by default, even in display style.
+
+        Measured on the corpus, where the scripts actually sit:
+        summationdisplay 140 under / 59 beside, productdisplay 59 / 11,
+        integraldisplay 2 under / 21 beside.
+        """
+        assert not texmap.takes_limits(None, "integraldisplay")
+        assert not texmap.takes_limits(None, "contourintegraldisplay")
+
+    def test_the_two_classes_do_not_overlap(self):
+        assert not (texmap.LIMIT_OPERATORS
+                    & texmap.LARGE_OPERATORS_DISPLAY)
+        assert not (texmap.LARGE_OPERATORS_DISPLAY
+                    & texmap.LARGE_OPERATORS_TEXT)
+
+
+# --- 737: the doublestroke font ----------------------------------------------
+
+def test_dsrom_is_a_maths_family_not_text():
+    """`dsrom12` is the `dsfont` package's font and every glyph of it is
+    double-struck. Read as TEXT, its `one` -- the IDENTITY MATRIX -- became an
+    ordinary `1` and the symbol stopped being itself: eight times in
+    wzlxjtu-026, against a gold that writes `\\mathds{1}` eight times."""
+    assert texmap.family_of("UTBNOO+dsrom12") == "doublestroke"
+    assert texmap.family_of("ABCDEF+dsrom10") == "doublestroke"
+
+
+def test_doublestroke_projects_to_mathds_not_mathbb():
+    r"""NOT `\mathbb`. amssymb's blackboard alphabet is msbm's, which carries
+    A-Z and no digits -- msbm's `1` slot is `\nVdash`, so `\mathbb{1}`
+    TYPESETS THE LOGIC SYMBOL U+22AE, "does not force". Verified by compiling
+    it: `$\mathbb{1}$` under amssymb comes back out of the PDF as U+22AE.
+    That is what MathPix emits here, nine times over this corpus."""
+    t = texmap.project("doublestroke", "one")
+    assert t.latex == r"\mathds{1}"
+    assert t.package == "dsfont"
+
+
+def test_doublestroke_letters_too():
+    assert texmap.project("doublestroke", "R").latex == r"\mathds{R}"
+
+
+def test_a_doublestroke_glyph_is_mathematics():
+    """Left out of MATH_FAMILIES its glyphs land in TEXT spans, which carry no
+    LaTeX -- so the one `\\mathds{1}` of wzlxjtu-026 that sits in an inline
+    formula rather than a display was dropped without trace."""
+    import docmodel_six
+    assert "doublestroke" in docmodel_six.MATH_FAMILIES

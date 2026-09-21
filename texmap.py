@@ -35,6 +35,9 @@ CONFIDENCE
 from __future__ import annotations
 
 import re
+
+_CM_SUBSET = re.compile(r"^[A-Z]{6}\+")
+_CM_BASE = re.compile(r"\d+$")
 from typing import NamedTuple
 
 
@@ -74,6 +77,35 @@ FAMILY_RULES = [
     (re.compile(r"LMMathExtension\d*", re.I), "math-extension"),
     (re.compile(r"LMSans(Quotation|Demi)?\d*|LMRoman\w*\d*", re.I),
      "text-cm"),
+    # TXFONTS / PXFONTS: the Times- and Palatino-based maths families, and
+    # what a `\usepackage{txfonts}` document emits. Unknown here they fell
+    # through to "text", so glyphs that the table already knows by name --
+    # `prime`, `multiply`, `element`, `latticetop` -- were never looked up:
+    # measured on 2601.07372, 16 deferrals from `txsys` and `txsym` alone,
+    # every one of them a name the maths tables carry.
+    #
+    # The suffix letter varies by role and by optical size (`txsy`, `txsys`,
+    # `txsym`, `txsyc`), so the match is on the STEM plus anything.
+    (re.compile(r"(tx|px)(b)?mi\w*", re.I), "math-italic"),
+    (re.compile(r"(tx|px)(b)?sy\w*", re.I), "math-symbol"),
+    (re.compile(r"(tx|px)(b)?ex\w*", re.I), "math-extension"),
+    # The `<Family>Math<Role>` naming that modern OpenType-era maths packages
+    # use -- `XCharterMathMI` is XCharter's maths italic and was read as text.
+    # Kept AFTER the explicit rules above so a known family still wins.
+    (re.compile(r"\w*Math(Italic|MI)\w*", re.I), "math-italic"),
+    (re.compile(r"\w*Math(Symbols?|SY)\w*", re.I), "math-symbol"),
+    (re.compile(r"\w*Math(Extension|EX)\w*", re.I), "math-extension"),
+    # DOUBLESTROKE (`dsfont`): a whole font whose every glyph is
+    # blackboard-bold, digits included. Unknown here it fell through to
+    # "text", so `dsrom12`'s `one` -- which is the IDENTITY MATRIX, the
+    # double-struck 1 -- projected as an ordinary `1` and the symbol stopped
+    # being itself. Eight of them in wzlxjtu-026 alone, against a gold that
+    # writes `\mathds{1}` eight times.
+    #
+    # It is NOT `\mathbb`: amssymb's blackboard alphabet is msbm's, which
+    # carries A-Z and no digits, so `\mathbb{1}` -- which is what MathPix
+    # emits here -- has nothing to set. The font names its own package.
+    (re.compile(r"dsrom\d*|doublestroke\w*", re.I), "doublestroke"),
     (re.compile(r"CMR\d*|CMBX\d*|CMTI\d*|CMSL\d*|CMTT\d*", re.I), "text-cm"),
 ]
 
@@ -546,6 +578,57 @@ _TEXT_ACCENT = {
 }
 
 
+#: Every glyph of a doublestroke font is the double-struck form of one
+#: ordinary character, so the projection is the character plus `\mathds`.
+#: The digits are named, the letters are not.
+_DOUBLESTROKE_CHAR = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+
+
+#: Computer Modern BOLD EXTENDED, the font `\bf` selects. `CMB10` is the
+#: unextended bold roman; both are used the same way.
+_BOLD_CM = re.compile(r"CM(BX|B)\d*$", re.I)
+
+
+def _bold_math_glyph(name: str, fontname: str | None) -> "TexToken | None":
+    r"""A letter of the BOLD TEXT FONT, used as a maths symbol.
+
+    747 -- a document that writes its vectors and matrices `\bf{t}`, `\bf{F}`,
+    `\bf{\Sigma}` sets them from CMBX, which classifies as `text-cm`; and a
+    plain letter from a text font has no maths projection, so it came back
+    UNKNOWN and took its whole span with it. Measured over the corpus: 582
+    such glyphs inside MATH spans, in 12 documents -- `F` 116 times, `n` 79,
+    `t` 54, `Sigma` 43.
+
+    wzlxjtu-074 is the clear case. Four of its six equations were lost to
+    `\hat{\bf{F}}_n`, and the reason reported was `unmapped-glyph`, not the
+    accent: the accent composes, the bold `F` under it does not exist.
+
+    Safe to decide here without knowing the span: prose is emitted from the
+    glyph's TEXT (`_run_text`), never from this token, which only a maths
+    span reads.
+
+    `\mathbf` and not `\boldsymbol`: it is what the author wrote (`\bf`), it
+    needs no package, and it sets uppercase Greek correctly -- checked by
+    compiling `$\mathbf{\Sigma}$`, which is clean.
+    """
+    if not name or not fontname:
+        return None
+    if not _BOLD_CM.match(_CM_SUBSET.sub("", fontname)):
+        return None
+    if len(name) == 1 and (name.isalpha() or name.isdigit()):
+        return TexToken(rf"\mathbf{{{name}}}", "atom", None, "corpus")
+    if name in _UPPER_GREEK:
+        up = "\\" + name
+        # only the CAPITALS: those are the Greek a roman font carries, and
+        # `\mathbf` over a lowercase Greek would be asking the operators
+        # font for a letter it does not have.
+        return TexToken(rf"\mathbf{{{up}}}", "atom", None, "corpus")
+    return None
+
+
 def _text_glyph(name: str) -> TexToken:
     """A text font's contribution to a formula.
 
@@ -602,7 +685,85 @@ def _math_extension(name: str) -> TexToken:
     return UNKNOWN
 
 
-def project(family: str, glyphname: str | None) -> TexToken:
+# --- mathabx (matha / mathb / mathx), by CID ---------------------------------
+#
+# `\\usepackage{mathabx}` REPLACES many standard maths symbols with its own
+# fonts, and those fonts reach the reader with no usable glyph names -- the
+# name pdfminer reports is a Latin fallback (`matha` slot 0xA5 comes back as
+# `ecaron`, the glyph is `\\geq`). Two documents in the corpus load it, and
+# they are the two whose mathematics was unreadable: wzlxjtu-001 and -002,
+# identical AAAI templates.
+#
+# TAKEN FROM THE PACKAGE, not inferred. `mathabx.dcl` declares every symbol
+# with its font and slot -- `\\DeclareMathSymbol`, `\\DeclareMathDelimiter`,
+# `\\DeclareMathAccent`, `\\DeclareMathRadical` -- and this is that file read
+# out: 573 (font, slot) -> name pairs. Checked against the corpus: slot 0xA4
+# is `leq` and 0xA5 is `geq`, which is what the surrounding formula
+# (`\\ell(\\theta_i^*) - l(\\theta^*) \\ge c(1)`) says those glyphs are.
+#
+# It does NOT cover everything: matha slots 112 and 113 appear 73 times each
+# and `mathabx.dcl` declares neither, so 229 of the 402 mathabx glyphs in
+# those two documents are still nameless.
+MATHABX = {
+    "matha": {2: 'times', 3: 'div', 4: 'cdotp', 5: 'circ', 6: 'ast', 7: 'coasterisk', 8: 'pm', 9: 'mp', 10: 'ltimes', 11: 'rtimes', 12: 'diamond', 13: 'bullet', 14: 'star', 15: 'varstar', 17: 'equiv', 18: 'sim', 19: 'approx', 20: 'simeq', 21: 'cong', 22: 'asymp', 23: 'divides', 24: 'neq', 25: 'notequiv', 26: 'nsim', 27: 'napprox', 28: 'nsimeq', 29: 'ncong', 30: 'notasymp', 31: 'notdivides', 32: 'neg', 33: 'll', 34: 'gg', 35: 'hash', 36: 'vdash', 37: 'dashv', 38: 'nvdash', 39: 'ndashv', 40: 'vDash', 41: 'Dashv', 42: 'nvDash', 43: 'nDashv', 44: 'Vdash', 45: 'dashV', 46: 'nVdash', 47: 'ndashV', 48: 'degree', 49: 'prime', 50: 'second', 51: 'third', 52: 'fourth', 53: 'flat', 54: 'natural', 55: 'sharp', 56: 'infty', 57: 'propto', 58: 'dagger', 59: 'ddagger', 60: 'ssum', 61: 'sprod', 62: 'amalg', 63: 'sqrt', 64: 'forall', 65: 'complement', 66: 'partial', 67: 'partialslash', 68: 'exists', 69: 'nexists', 70: 'Finv', 71: 'Game', 72: 'emptyset', 73: 'diameter', 74: 'top', 75: 'bot', 76: 'nottop', 77: 'notbot', 78: 'curlywedge', 79: 'curlyvee', 80: 'in', 81: 'owns', 82: 'notin', 83: 'notowner', 84: 'varnotin', 85: 'varnotowner', 86: 'barin', 87: 'ownsbar', 88: 'cap', 89: 'cup', 90: 'uplus', 91: 'sqcap', 92: 'sqcup', 93: 'squplus', 94: 'wedge', 95: 'vee', 96: 'oplus', 97: 'ominus', 98: 'otimes', 99: 'odiv', 100: 'odot', 101: 'ocirc', 102: 'oasterisk', 103: 'ocoasterisk', 104: 'oleft', 105: 'oright', 106: 'otop', 107: 'obot', 108: 'ovoid', 109: 'oslash', 110: 'obackslash', 111: 'otriangleup', 116: 'lbrace', 117: 'rbrace', 118: 'ldbrack', 119: 'rdbrack', 120: 'langle', 121: 'rangle', 122: 'backslash', 124: 'mid', 125: 'Vert', 126: 'vvvert', 127: 'notsign', 128: 'subset', 129: 'supset', 130: 'nsubset', 131: 'nsupset', 132: 'subseteq', 133: 'supseteq', 134: 'nsubseteq', 135: 'nsupseteq', 136: 'subsetneq', 137: 'supsetneq', 138: 'varsubsetneq', 139: 'varsupsetneq', 140: 'subseteqq', 141: 'supseteqq', 142: 'nsubseteqq', 143: 'nsupseteqq', 144: 'subsetneqq', 145: 'supsetneqq', 146: 'varsubsetneqq', 147: 'varsupsetneqq', 148: 'Subset', 149: 'Supset', 150: 'nSubset', 151: 'nSupset', 152: 'triangleleft', 153: 'triangleright', 154: 'ntriangleleft', 155: 'ntriangleright', 156: 'trianglelefteq', 157: 'trianglerighteq', 158: 'ntrianglelefteq', 159: 'ntrianglerighteq', 162: 'nless', 163: 'ngtr', 164: 'leq', 165: 'geq', 166: 'nleq', 167: 'ngeq', 168: 'varleq', 169: 'vargeq', 170: 'nvarleq', 171: 'nvargeq', 172: 'lneq', 173: 'gneq', 174: 'leqq', 175: 'geqq', 176: 'nleqq', 177: 'ngeqq', 178: 'lneqq', 179: 'gneqq', 180: 'lvertneqq', 181: 'gvertneqq', 182: 'eqslantless', 183: 'eqslantgtr', 184: 'neqslantless', 185: 'neqslantgtr', 186: 'lessgtr', 187: 'gtrless', 188: 'lesseqgtr', 189: 'gtreqless', 190: 'lesseqqgtr', 191: 'gtreqqless', 192: 'lesssim', 193: 'gtrsim', 194: 'nlesssim', 195: 'ngtrsim', 196: 'lnsim', 197: 'gnsim', 198: 'lessapprox', 199: 'gtrapprox', 200: 'nlessapprox', 201: 'ngtrapprox', 202: 'lnapprox', 203: 'gnapprox', 204: 'lessdot', 205: 'gtrdot', 206: 'lll', 207: 'ggg', 208: 'leftarrow', 209: 'rightarrow', 210: 'uparrow', 211: 'downarrow', 212: 'nwarrow', 213: 'nearrow', 214: 'swarrow', 215: 'searrow', 216: 'leftrightarrow', 217: 'updownarrow', 218: 'nleftarrow', 219: 'nrightarrow', 220: 'nleftrightarrow', 221: 'relbar', 222: 'mapstochar', 223: 'mapsfromchar', 224: 'leftharpoonup', 225: 'rightharpoonup', 226: 'leftharpoondown', 227: 'rightharpoondown', 228: 'upharpoonleft', 229: 'downharpoonleft', 230: 'upharpoonright', 231: 'downharpoonright', 232: 'leftrightharpoons', 233: 'rightleftharpoons', 234: 'updownharpoons', 235: 'downupharpoons', 240: 'Leftarrow', 241: 'Rightarrow', 242: 'Uparrow', 243: 'Downarrow', 244: 'Leftrightarrow', 245: 'Updownarrow', 246: 'nLeftarrow', 247: 'nRightarrow', 248: 'nLeftrightarrow', 249: 'Relbar', 250: 'Mapstochar', 251: 'Mapsfromchar'},
+    "mathb": {0: 'dotplus', 1: 'dotdiv', 2: 'dottimes', 3: 'divdot', 4: 'udot', 5: 'square', 6: 'Asterisk', 7: 'coAsterisk', 8: 'circplus', 9: 'pluscirc', 10: 'convolution', 11: 'divideontimes', 12: 'blackdiamond', 13: 'sqbullet', 14: 'bigstar', 15: 'bigvarstar', 16: 'topdoteq', 17: 'botdoteq', 18: 'dotseq', 19: 'risingdotseq', 20: 'fallingdotseq', 21: 'coloneq', 22: 'eqcolon', 23: 'bumpedeq', 24: 'eqbumped', 25: 'Bumpedeq', 26: 'circeq', 27: 'eqcirc', 28: 'triangleq', 29: 'corresponds', 32: 'between', 33: 'smile', 34: 'frown', 35: 'varhash', 36: 'leftthreetimes', 37: 'rightthreetimes', 38: 'pitchfork', 39: 'bowtie', 40: 'VDash', 41: 'DashV', 42: 'nVDash', 43: 'nDashV', 44: 'Vvdash', 45: 'dashVv', 46: 'nVvash', 47: 'ndashVv', 54: 'therefore', 55: 'because', 56: 'ring', 57: 'dot', 58: 'ddot', 59: 'dddot', 60: 'ddddot', 61: 'angle', 62: 'measuredangle', 63: 'sphericalangle', 64: 'Sun', 65: 'Mercury', 66: 'Venus', 67: 'Earth', 68: 'Mars', 69: 'Jupiter', 70: 'Saturn', 71: 'Uranus', 72: 'Neptune', 73: 'Pluto', 74: 'varEarth', 75: 'leftmoon', 76: 'rightmoon', 77: 'fullmoon', 78: 'newmoon', 79: 'rip', 80: 'Aries', 81: 'Taurus', 82: 'Gemini', 83: 'Cancer', 84: 'Leo', 85: 'Virgo', 86: 'Libra', 87: 'Scorpio', 88: 'Sagittarius', 89: 'Capricornus', 90: 'doublebarwedge', 91: 'veedoublebar', 92: 'doublecap', 93: 'doublecup', 94: 'sqdoublecap', 95: 'sqdoublecup', 96: 'boxplus', 97: 'boxminus', 98: 'boxtimes', 99: 'boxdiv', 100: 'boxdot', 101: 'boxcirc', 102: 'boxasterisk', 103: 'boxcoasterisk', 104: 'boxleft', 105: 'boxright', 106: 'boxtop', 107: 'boxbot', 108: 'boxvoid', 109: 'boxslash', 110: 'boxbackslash', 111: 'boxtriangleup', 112: 'lgroup', 113: 'rgroup', 114: 'lceil', 115: 'rceil', 116: 'lfloor', 117: 'rfloor', 118: 'lcorners', 119: 'rcorners', 120: 'ulcorner', 121: 'urcorner', 122: 'llcorner', 123: 'lrcorner', 126: 'thickvert', 127: 'varnotsign', 128: 'sqsubset', 129: 'sqsupset', 130: 'nsqsubset', 131: 'nsqsupset', 132: 'sqsubseteq', 133: 'sqsupseteq', 134: 'nsqsubseteq', 135: 'nsqsupseteq', 136: 'sqsubsetneq', 137: 'sqsupsetneq', 138: 'varsqsubsetneq', 139: 'varsqsupsetneq', 140: 'sqsubseteqq', 141: 'sqsupseteqq', 142: 'nsqsubseteqq', 143: 'nsqsupseteqq', 144: 'sqsubsetneqq', 145: 'sqsupsetneqq', 146: 'varsqsubsetneqq', 147: 'varsqsupsetneqq', 148: 'sqSubset', 149: 'sqSupset', 150: 'nsqSubset', 151: 'nsqSupset', 152: 'smalltriangleup', 153: 'smalltriangledown', 154: 'smalltriangleleft', 155: 'smalltriangleright', 156: 'blacktriangleup', 157: 'blacktriangledown', 158: 'blacktriangleleft', 159: 'blacktriangleright', 160: 'prec', 161: 'succ', 162: 'nprec', 163: 'nsucc', 164: 'preccurlyeq', 165: 'succcurlyeq', 166: 'npreccurlyeq', 167: 'nsucccurlyeq', 168: 'preceq', 169: 'succeq', 170: 'npreceq', 171: 'nsucceq', 172: 'precneq', 173: 'succneq', 174: 'preceqq', 175: 'succeqq', 176: 'notpreceqq', 177: 'notsucceqq', 178: 'precneqq', 179: 'succneqq', 180: 'precvertneqq', 181: 'succvertneqq', 182: 'curlyeqprec', 183: 'curlyeqsucc', 184: 'ncurlyeqprec', 185: 'ncurlyeqsucc', 192: 'precsim', 193: 'succsim', 194: 'nprecsim', 195: 'nsuccsim', 196: 'precnsim', 197: 'succnsim', 198: 'precapprox', 199: 'succapprox', 200: 'nprecapprox', 201: 'nsuccapprox', 202: 'precnapprox', 203: 'succnapprox', 206: 'llcurly', 207: 'ggcurly', 208: 'leftleftarrows', 209: 'rightrightarrows', 210: 'upuparrows', 211: 'downdownarrows', 212: 'leftrightarrows', 213: 'rightleftarrows', 214: 'updownarrows', 215: 'downuparrows', 216: 'leftleftharpoons', 217: 'rightrightharpoons', 218: 'upupharpoons', 219: 'downdownharpoons', 220: 'leftbarharpoon', 221: 'rightbarharpoon', 222: 'barleftharpoon', 223: 'barrightharpoon', 224: 'leftrightharpoon', 225: 'rightleftharpoon', 226: 'rhook', 227: 'lhook', 228: 'diagup', 229: 'diagdown', 232: 'Lsh', 233: 'Rsh', 234: 'dlsh', 235: 'drsh', 236: 'looparrowleft', 237: 'looparrowright', 238: 'looparrowdownleft', 239: 'looparrowdownright', 240: 'curvearrowleft', 241: 'curvearrowright', 242: 'curvearrowleftright', 243: 'curvearrowbotleft', 244: 'curvearrowbotright', 245: 'curvearrowbotleftright', 246: 'circlearrowleft', 247: 'circlearrowright', 248: 'leftsquigarrow', 249: 'rightsquigarrow', 250: 'leftrightsquigarrow', 252: 'lefttorightarrow', 253: 'righttoleftarrow', 254: 'uptodownarrow', 255: 'downtouparrow'},
+    "mathx": {5: 'lmoustache', 7: 'vert', 13: 'rmoustache', 15: 'Vert', 23: 'vvvert', 31: 'thickvert', 32: 'lbrace', 40: 'rbrace', 48: 'ldbrack', 55: 'lfilet', 56: 'rdbrack', 63: 'rfilet', 64: 'smallsum', 65: 'smallprod', 66: 'smallcoprod', 67: 'complement', 68: 'boldcomplement', 69: 'boldcup', 70: 'boldcap', 71: 'boldZ', 72: 'backslash', 74: 'bigboldZ', 80: 'lceil', 84: 'rceil', 88: 'lfloor', 92: 'rfloor', 96: 'sqrt', 97: 'sqrt', 104: 'braceld', 105: 'bracemd', 106: 'bracerd', 107: 'bracexd', 108: 'bracelu', 109: 'bracemu', 110: 'braceru', 111: 'bracexu', 112: 'widehat', 113: 'widecheck', 114: 'widetilde', 115: 'widebar', 116: 'widearrow', 117: 'wideparen', 118: 'lgroup', 119: 'rgroup', 144: 'bigplus', 145: 'bigtimes', 146: 'bigcomplementop', 147: 'bigtruc', 148: 'bigcurt', 149: 'biguplus', 150: 'bigsqcap', 151: 'bigsqcup', 152: 'bigsquplus', 153: 'bigwedge', 154: 'bigvee', 155: 'bigcurlywedge', 156: 'bigcurlyvee', 157: 'uparrow', 158: 'downarrow', 159: 'updownarrow', 173: 'Uparrow', 174: 'Downarrow', 175: 'Updownarrow', 176: 'sum', 177: 'prod', 178: 'coprod', 179: 'intop', 180: 'iintop', 181: 'iiintop', 182: 'ointop', 183: 'oiintop', 192: 'bigoplus', 193: 'bigominus', 194: 'bigotimes', 195: 'bigodiv', 196: 'bigodot', 197: 'bigocirc', 198: 'bigoasterisk', 199: 'bigocoasterisk', 200: 'bigoleft', 201: 'bigoright', 202: 'bigotop', 203: 'bigobot', 204: 'bigovoid', 205: 'bigoslash', 206: 'bigobackslash', 207: 'bigotriangleup', 208: 'bigboxplus', 209: 'bigboxminus', 210: 'bigboxtimes', 211: 'bigboxdiv', 212: 'bigboxdot', 213: 'bigboxcirc', 214: 'bigboxasterisk', 215: 'bigboxcoasterisk', 216: 'bigboxleft', 217: 'bigboxright', 218: 'bigboxtop', 219: 'bigboxbot', 220: 'bigboxvoid', 221: 'bigboxslash', 222: 'bigboxbackslash', 223: 'bigboxtriangleup'},
+}
+
+_MATHABX_FONT = re.compile(r"^(?:[A-Z]{6}\+)?TeX-(math[abx])\d+$")
+
+
+def mathabx_name(fontname: str | None, cid: int) -> str | None:
+    """The mathabx symbol name for a CID, from the package's own tables."""
+    if not fontname or cid < 0:
+        return None
+    m = _MATHABX_FONT.match(fontname)
+    return MATHABX.get(m.group(1), {}).get(cid) if m else None
+
+
+# --- Computer Modern encodings, by CID ------------------------------------
+#
+# A subsetted CM font sometimes reaches the reader with NO glyph names at all.
+# The identity is still there -- the CID -- because the CM encodings (OT1,
+# OML, OMS, OMX) are fixed: CMSY slot 48 is `prime` in every CMSY ever cut.
+#
+# WHY THIS IS NEEDED, and it is not hypothetical. pdf2mmd's own output
+# re-rendered through MathPix and read back gives, for a page it reads
+# perfectly in the original:
+#
+#     CMSY10 cid=0  name=None text='-'   CMMI10 cid=64  name=None text='d'
+#     CMSY10 cid=48 name=None text="'"   CMEX10 cid=113 name=None text='q'
+#
+# -- 24 of 36 maths spans deferred as `unmapped-glyph`, on `\partial`,
+# `\prime`, `-` and `\radicalBig`. The FONT is classified correctly; only the
+# name is missing.
+#
+# BUILT FROM THE CORPUS, not from memory. Every (family, cid) pair the 102
+# documents resolve by name was collected -- 391 pairs across 8 families --
+# and checked for disagreement: ZERO pairs carry two names. The encodings are
+# what they are said to be, and this is that evidence written down.
+CM_ENCODING = {
+    "CMBX": {1: 'Delta', 6: 'Sigma', 8: 'Phi', 11: 'ff', 12: 'fi', 40: 'parenleft', 41: 'parenright', 44: 'comma', 45: 'hyphen', 46: 'period', 48: 'zero', 49: 'one', 50: 'two', 51: 'three', 52: 'four', 53: 'five', 55: 'seven', 56: 'eight', 58: 'colon', 63: 'question', 65: 'A', 66: 'B', 67: 'C', 68: 'D', 69: 'E', 70: 'F', 71: 'G', 72: 'H', 73: 'I', 75: 'K', 76: 'L', 77: 'M', 78: 'N', 79: 'O', 80: 'P', 81: 'Q', 82: 'R', 83: 'S', 84: 'T', 85: 'U', 86: 'V', 88: 'X', 89: 'Y', 90: 'Z', 94: 'circumflex', 97: 'a', 98: 'b', 99: 'c', 100: 'd', 101: 'e', 102: 'f', 103: 'g', 104: 'h', 105: 'i', 106: 'j', 107: 'k', 108: 'l', 109: 'm', 110: 'n', 111: 'o', 112: 'p', 113: 'q', 114: 'r', 115: 's', 116: 't', 117: 'u', 118: 'v', 119: 'w', 120: 'x', 121: 'y', 122: 'z'},
+    "CMEX": {0: 'parenleftbig', 1: 'parenrightbig', 2: 'bracketleftbig', 3: 'bracketrightbig', 8: 'braceleftbig', 9: 'bracerightbig', 12: 'vextendsingle', 16: 'parenleftBig', 17: 'parenrightBig', 18: 'parenleftbigg', 19: 'parenrightbigg', 20: 'bracketleftbigg', 21: 'bracketrightbigg', 26: 'braceleftbigg', 32: 'parenleftBigg', 33: 'parenrightBigg', 34: 'bracketleftBigg', 35: 'bracketrightBigg', 48: 'parenlefttp', 49: 'parenrighttp', 50: 'bracketlefttp', 51: 'bracketrighttp', 52: 'bracketleftbt', 53: 'bracketrightbt', 54: 'bracketleftex', 55: 'bracketrightex', 64: 'parenleftbt', 65: 'parenrightbt', 73: 'contintegraldisplay', 80: 'summationtext', 81: 'producttext', 88: 'summationdisplay', 89: 'productdisplay', 90: 'integraldisplay', 101: 'tildewide', 104: 'bracketleftBig', 105: 'bracketrightBig', 112: 'radicalbig', 113: 'radicalBig', 114: 'radicalbigg', 115: 'radicalBigg', 122: 'bracehtipdownleft', 123: 'bracehtipdownright', 124: 'bracehtipupleft', 125: 'bracehtipupright'},
+    "CMMI": {11: 'alpha', 12: 'beta', 13: 'gamma', 14: 'delta', 15: 'epsilon1', 16: 'zeta', 17: 'eta', 18: 'theta', 21: 'lambda', 22: 'mu', 23: 'nu', 24: 'xi', 25: 'pi', 26: 'rho', 27: 'sigma', 28: 'tau', 30: 'phi', 31: 'chi', 32: 'psi', 33: 'omega', 34: 'epsilon', 39: 'phi1', 58: 'period', 59: 'comma', 60: 'less', 61: 'slash', 62: 'greater', 63: 'star', 64: 'partialdiff', 65: 'A', 66: 'B', 67: 'C', 68: 'D', 69: 'E', 70: 'F', 71: 'G', 72: 'H', 73: 'I', 74: 'J', 75: 'K', 76: 'L', 77: 'M', 78: 'N', 79: 'O', 80: 'P', 81: 'Q', 82: 'R', 83: 'S', 84: 'T', 85: 'U', 86: 'V', 87: 'W', 88: 'X', 89: 'Y', 90: 'Z', 96: 'lscript', 97: 'a', 98: 'b', 99: 'c', 100: 'd', 101: 'e', 102: 'f', 103: 'g', 104: 'h', 105: 'i', 106: 'j', 107: 'k', 108: 'l', 109: 'm', 110: 'n', 111: 'o', 112: 'p', 113: 'q', 114: 'r', 115: 's', 116: 't', 117: 'u', 118: 'v', 119: 'w', 120: 'x', 121: 'y', 122: 'z'},
+    "CMR": {0: 'Gamma', 1: 'Delta', 2: 'Theta', 3: 'Lambda', 5: 'Pi', 6: 'Sigma', 8: 'Phi', 10: 'Omega', 11: 'ff', 12: 'fi', 13: 'fl', 14: 'ffi', 19: 'acute', 22: 'macron', 33: 'exclam', 34: 'quotedblright', 35: 'numbersign', 39: 'quoteright', 40: 'parenleft', 41: 'parenright', 43: 'plus', 44: 'comma', 45: 'hyphen', 46: 'period', 47: 'slash', 48: 'zero', 49: 'one', 50: 'two', 51: 'three', 52: 'four', 53: 'five', 54: 'six', 55: 'seven', 56: 'eight', 57: 'nine', 58: 'colon', 59: 'semicolon', 61: 'equal', 65: 'A', 66: 'B', 67: 'C', 68: 'D', 69: 'E', 70: 'F', 71: 'G', 72: 'H', 73: 'I', 74: 'J', 75: 'K', 76: 'L', 77: 'M', 78: 'N', 79: 'O', 80: 'P', 81: 'Q', 82: 'R', 83: 'S', 84: 'T', 85: 'U', 86: 'V', 87: 'W', 89: 'Y', 90: 'Z', 91: 'bracketleft', 92: 'quotedblleft', 93: 'bracketright', 94: 'circumflex', 96: 'quoteleft', 97: 'a', 98: 'b', 99: 'c', 100: 'd', 101: 'e', 102: 'f', 103: 'g', 104: 'h', 105: 'i', 106: 'j', 107: 'k', 108: 'l', 109: 'm', 110: 'n', 111: 'o', 112: 'p', 113: 'q', 114: 'r', 115: 's', 116: 't', 117: 'u', 118: 'v', 119: 'w', 120: 'x', 121: 'y', 122: 'z', 123: 'endash', 126: 'tilde'},
+    "CMSY": {0: 'minus', 1: 'periodcentered', 2: 'multiply', 3: 'asteriskmath', 6: 'plusminus', 7: 'minusplus', 8: 'circleplus', 10: 'circlemultiply', 12: 'circledot', 14: 'openbullet', 15: 'bullet', 17: 'equivalence', 18: 'reflexsubset', 20: 'lessequal', 21: 'greaterequal', 24: 'similar', 25: 'approxequal', 28: 'lessmuch', 33: 'arrowright', 36: 'arrowboth', 39: 'similarequal', 41: 'arrowdblright', 47: 'proportional', 48: 'prime', 49: 'infinity', 50: 'element', 54: 'negationslash', 56: 'universal', 62: 'latticetop', 67: 'C', 68: 'D', 69: 'E', 70: 'F', 72: 'H', 75: 'K', 76: 'L', 77: 'M', 78: 'N', 79: 'O', 80: 'P', 83: 'S', 87: 'W', 88: 'X', 90: 'Z', 91: 'union', 94: 'logicaland', 98: 'floorleft', 99: 'floorright', 102: 'braceleft', 103: 'braceright', 104: 'angbracketleft', 105: 'angbracketright', 106: 'bar', 107: 'bardbl', 110: 'backslash', 112: 'radical', 114: 'nabla', 121: 'dagger'},
+    "CMTI": {12: 'fi', 44: 'comma', 45: 'hyphen', 46: 'period', 48: 'zero', 49: 'one', 65: 'A', 66: 'B', 69: 'E', 76: 'L', 80: 'P', 83: 'S', 84: 'T', 97: 'a', 98: 'b', 99: 'c', 100: 'd', 101: 'e', 102: 'f', 103: 'g', 104: 'h', 105: 'i', 106: 'j', 108: 'l', 109: 'm', 110: 'n', 111: 'o', 112: 'p', 114: 'r', 115: 's', 116: 't', 117: 'u', 119: 'w', 120: 'x', 121: 'y'},
+    "CMTT": {101: 'e', 113: 'q', 116: 't'},
+    "MSAM": {3: 'square'},
+}
+
+
+def cm_glyphname(fontname: str | None, cid: int) -> str | None:
+    """The CM glyph name for a CID, when the font declared none."""
+    if not fontname or cid < 0:
+        return None
+    base = _CM_BASE.sub("", _CM_SUBSET.sub("", fontname))
+    return CM_ENCODING.get(base, {}).get(cid)
+
+
+def project(family: str, glyphname: str | None,
+            cid: int = -1, fontname: str | None = None) -> TexToken:
     """Map one glyph identity to a LaTeX token.
 
     Returns UNKNOWN rather than a guess whenever the identity is not stated,
@@ -610,6 +771,15 @@ def project(family: str, glyphname: str | None) -> TexToken:
     "keep the blob" — never as "emit nothing and move on".
     """
     if not glyphname:
+        # One identity survives a missing glyph name: MSBM10's blackboard
+        # capitals, which are keyed by CID. Everything else abstains, as
+        # before -- a nameless glyph is not an identity.
+        name = mathabx_name(fontname, cid)
+        if name:
+            return TexToken("\\" + name, "atom", "mathabx", "corpus")
+        if family == "ams-symbol" and 65 <= cid <= 90:
+            return TexToken(rf"\mathbb{{{chr(cid)}}}", "atom", "amssymb",
+                            "corpus")
         return UNKNOWN
     if family == "math-italic":
         return _math_italic(glyphname)
@@ -617,9 +787,19 @@ def project(family: str, glyphname: str | None) -> TexToken:
         return _math_symbol(glyphname)
     if family == "math-extension":
         return _math_extension(glyphname)
+    if family == "doublestroke":
+        ch = _DOUBLESTROKE_CHAR.get(glyphname)
+        if ch is None and len(glyphname) == 1 and glyphname.isalnum():
+            ch = glyphname
+        if ch:
+            return TexToken(rf"\mathds{{{ch}}}", "atom", "dsfont", "corpus")
+        return UNKNOWN
     if family in ("text", "text-cm"):
+        bold = _bold_math_glyph(glyphname, fontname)
+        if bold is not None:
+            return bold
         return _text_glyph(glyphname)
-    if family == "ams-symbol":
+    if family == "ams-symbol" and glyphname:
         # A wide accent is an accent whatever font it was found in: some
         # documents ship `hatwide` in a family this classifier reads as AMS.
         if glyphname in _WIDE_ACCENT:
@@ -631,6 +811,18 @@ def project(family: str, glyphname: str | None) -> TexToken:
         if len(glyphname) == 1 and glyphname.isupper():
             return TexToken(rf"\mathbb{{{glyphname}}}", "atom", "amssymb", "corpus")
         return UNKNOWN
+    if family == "ams-symbol" and 65 <= cid <= 90:
+        # MSBM10 CARRIES NO GLYPH NAMES AT ALL. Its `Encoding` is absent and
+        # the fork resolves nothing from the font program, so every glyph
+        # arrives with `glyphname=None` and the branch above cannot fire --
+        # `\mathbb{H}` deferred as an unmapped glyph, taking its whole span
+        # with it, five times in wzlxjtu-008 alone.
+        #
+        # The CID still says which letter it is: msbm10 sets the blackboard
+        # capitals at the ASCII uppercase slots. Checked over the corpus
+        # before relying on it -- 100 MSBM glyphs, every one with a cid in
+        # 65..90 and text exactly chr(cid), and not one with a glyph name.
+        return TexToken(rf"\mathbb{{{chr(cid)}}}", "atom", "amssymb", "corpus")
     # A fraktur or script font carries ORDINARY PUNCTUATION too: a formula
     # set in Euler emits its parentheses, its `=` and its `-` from EUFM10,
     # not from the maths font beside it. Refusing those deferred the whole
@@ -1010,6 +1202,117 @@ OPERATOR_NAMES = (
     "inf", "ker", "lim", "log", "max", "min", "sec", "sup", "arg", "cos",
     "cot", "csc", "deg", "sin", "tan", "ln", "lg", "Pr",
 )
+
+# --- LIMIT PLACEMENT, AS A TABLE -------------------------------------------
+#
+# Whether an operator sets its scripts BELOW/ABOVE or BESIDE is not visible on
+# the page: `\\max_{x\\in A}` and `\\log_2` are both upright roman letter runs,
+# and only the first centres its condition underneath. No geometry separates
+# them, so the reader has to be told. This is that table, and it is taken
+# from LaTeX rather than remembered.
+#
+# PROVENANCE. `amsopn.sty` declares each name as `\\qopname\\relax m{...}` or
+# `\\qopname\\relax o{...}` -- m for MOVABLE LIMITS, o for ordinary. Extracted
+# from the installed TeX tree (texmf-dist/tex/latex/amsmath/amsopn.sty):
+#
+#     m (12)  Pr det gcd inf injlim lim liminf limsup max min projlim sup
+#     o (22)  arccos arcsin arctan arg cos cosh cot coth csc deg dim exp hom
+#             ker lg ln log sec sin sinh tan tanh
+#
+# `\\varlimsup`, `\\varliminf`, `\\varinjlim`, `\\varprojlim` and `\\varlim` are
+# built separately in the same file (from an overlined `lim`) and take limits
+# like the family they belong to.
+#
+# NOTE, because it is the obvious mistake and it was made: `\\dim`, `\\hom`,
+# `\\ker`, `\\deg` and `\\arg` LOOK like they belong with `\\max` and `\\min`
+# -- they are short, upright, and take a subscript -- and amsopn declares all
+# five `o`. Their scripts sit beside them. Treating them as limit operators
+# makes the reader claim a neighbouring term's scripts.
+LIMIT_OPERATORS = frozenset((
+    "Pr", "det", "gcd", "inf", "injlim", "lim", "liminf", "limsup",
+    "max", "min", "projlim", "sup",
+    "varinjlim", "varliminf", "varlimsup", "varprojlim",
+))
+# `varlim` is NOT in that set: `\\varlim@` is amsopn's internal helper
+# (`\\protected\\def\\varlim@#1#2`), not a command an author can write. There
+# are exactly four `\\var*lim` operators. Scraping the file for
+# `\\protected\\def\\(var[a-z]+)` picks the helper up because `\\b` matches at
+# the `@`.
+#
+# KERNEL-ONLY CAVEAT, recorded because nothing here can detect it. Without
+# `amsmath`, `latex.ltx` leaves `\\dim` and `\\ker` WITHOUT `\\nolimits`, so
+# they take under-limits in display style; `amsopn` redefines both to `o`.
+# A reader working from the PDF cannot see which was loaded. All 102 gold
+# documents in this corpus load `amsmath`, and none of them writes `\\dim_`
+# or `\\ker_`, so the question is not live here -- but a document that skips
+# `amsmath` and subscripts a `\\dim` will be read with its script beside the
+# operator when the page shows it underneath.
+
+#: Sum-class operators, which take limits in display style AND change size.
+#: These arrive as glyphs from the extensible font, so they are named by
+#: GLYPH, not by control sequence. The `display`/`text` suffix is the size
+#: TeX chose, which is itself the statement of which style the row is in:
+#: `summationdisplay` carries its limits above and below, `summationtext`
+#: beside it. Measured over the corpus, the extensible font yields exactly
+#: `integraldisplay`, `summationdisplay`, `summationtext` and
+#: `productdisplay`; the rest of the class is listed because it is the same
+#: class, not because this corpus exercises it.
+# INTEGRALS ARE NOT IN THIS LIST, and the corpus is why. Measured over the
+# 102 documents, counting where each operator's scripts actually sit:
+#
+#     summationdisplay   140 under   59 beside
+#     productdisplay      59 under   11 beside
+#     integraldisplay      2 under   21 beside     <-- the odd one out
+#
+# which is right and the table was wrong: `\\int` is `\\nolimits` by default
+# even in display style -- TeX sets its limits at the upper right, not above
+# and below -- while `\\sum` and `\\prod` are `\\displaylimits`. Listing
+# integrals here would have made the reader hunt for a condition underneath
+# an operator that never has one.
+_LARGE_OP_STEMS = (
+    "summation", "product", "coproduct",
+    "union", "intersection", "unionmulti", "squareunion",
+    "logicaland", "logicalor", "circleplus", "circlemultiply", "circledot",
+)
+LARGE_OPERATORS_DISPLAY = frozenset(s + "display" for s in _LARGE_OP_STEMS)
+LARGE_OPERATORS_TEXT = frozenset(s + "text" for s in _LARGE_OP_STEMS)
+
+
+def may_take_limits(latex: str | None = None,
+                    glyphname: str | None = None) -> bool:
+    r"""COULD a script centred under this operator be one of its limits?
+
+    Not the same question as `takes_limits`, which answers what LaTeX does by
+    DEFAULT. Two things put limits under an operator that the default would
+    have set beside it: `\limits` after any Op atom, and a display sub-formula
+    set in text style. Measured on the corpus, `producttext` -- the text-size
+    product -- carries limits above and below 31 times against 9 beside, e.g.
+    `\prod` with `i=1` under it and `8` over it in wzlxjtu-078 and -084.
+
+    So for the SUM CLASS the size variant is not evidence either way, and the
+    geometry decides: a script that overhangs the operator horizontally is a
+    limit, a script sitting to its right is not. A named operator is still
+    judged by the table, because `\log_2` and `\max_{x}` are identical runs of
+    upright letters and geometry cannot separate them.
+    """
+    if latex and latex.lstrip("\\") in LIMIT_OPERATORS:
+        return True
+    return bool(glyphname) and (glyphname in LARGE_OPERATORS_DISPLAY
+                                or glyphname in LARGE_OPERATORS_TEXT)
+
+
+def takes_limits(latex: str | None = None, glyphname: str | None = None) -> bool:
+    """Does this operator set its scripts BELOW and ABOVE, not beside?
+
+    Answers for both classes: a named operator by its control sequence, a
+    sum-class operator by its glyph. A `...text` glyph is the SAME operator
+    set in text style, where TeX puts the limits beside it -- so it is
+    deliberately not in the display set.
+    """
+    if latex and latex.lstrip("\\") in LIMIT_OPERATORS:
+        return True
+    return bool(glyphname) and glyphname in LARGE_OPERATORS_DISPLAY
+
 
 _BY_LENGTH = tuple(sorted(OPERATOR_NAMES, key=len, reverse=True))
 

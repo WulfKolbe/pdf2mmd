@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass, replace
 
 from docmodel_six import MATH_FAMILIES, GlyphNode, RuleNode, glyph_latex
+import os as _os
+import texmap
 from texmap import TexToken, math_space
 
 # A script is smaller than its base. Measured on the corpus: 6.97pt scripts
@@ -88,7 +90,36 @@ def _split_fractions(glyphs: list[GlyphNode], rules: list[RuleNode]):
 
 
 def _weave_underscores(triples, unders, depth: int) -> str | None:
-    """Emit the row with its underscore rules back in x-order."""
+    r"""Emit the row with its underscore rules back in x-order.
+
+    AN UNDERSCORE INSIDE A SCRIPT GOES INSIDE THE SCRIPT. This wove every
+    underscore at ROW level, sorted by x against the x of each term's BASE --
+    but a script's glyphs are consumed into `^{...}`, so an underscore sitting
+    among them always sorts after the whole term and is emitted behind it:
+
+        gold   y_{t}^{imp\_tot}          y_{t,est}^{gb\_imp}
+        got    y_{t}^{imp tot}\_         y_{t,est}^{gb exp}\_
+
+    which is not a near miss. The identifier `imp_tot` became `imp tot`, two
+    tokens, and a stray `\_` landed outside the group -- so the name is wrong
+    AND the underscore is attached to whatever follows. Measured on the two
+    documents in this corpus whose variable names carry underscores,
+    wzlxjtu-067 and wzlxjtu-068, every one of them was misplaced this way.
+
+    An underscore whose centre lies within a script group's x-span is handed
+    to that group's own `to_tex`, which welds it in by this same function one
+    level down. Only the ones left over are woven at row level.
+    """
+    def _inside(gs):
+        """The underscore rules whose centre falls within these glyphs."""
+        if not gs:
+            return []
+        x0 = min(g.rect[0] for g in gs)
+        x1 = max(g.rect[2] for g in gs)
+        return [r for r in unders
+                if x0 - 1 <= 0.5 * (r.rect[0] + r.rect[2]) <= x1 + 1]
+
+    taken: set[int] = set()
     items: list[tuple[float, str]] = []
     for base, sup, sub in triples:
         if base is None:
@@ -98,17 +129,23 @@ def _weave_underscores(triples, unders, depth: int) -> str | None:
             return None
         part = lit
         if sub:
-            s = to_tex(sub, [], depth + 1)
+            mine = _inside(sub)
+            s = to_tex(sub, list(mine), depth + 1)
             if s is None:
                 return None
+            taken.update(id(r) for r in mine)
             part += f"_{{{s}}}"
         if sup:
-            s = to_tex(sup, [], depth + 1)
+            mine = _inside(sup)
+            s = to_tex(sup, list(mine), depth + 1)
             if s is None:
                 return None
+            taken.update(id(r) for r in mine)
             part += f"^{{{s}}}"
         items.append((base.rect[0], part))
     for r in unders:
+        if id(r) in taken:
+            continue
         items.append((r.rect[0], r"\_"))
     items.sort(key=lambda t: t[0])
     # The SECOND join site, and it had no guard either. `P` `\cdot` `y` came
@@ -163,8 +200,26 @@ def _attach_scripts(glyphs: list[GlyphNode]):
     # high -- a fraction, a raised full-size script -- redefine the row and
     # push every real base into a subscript.
     from collections import Counter
+    # A BIG OPERATOR OR DELIMITER DOES NOT GET A VOTE. It is grown about the
+    # maths axis, not set on the line -- this file says so two comments up --
+    # so its baseline is off the row BY DESIGN and is no evidence of where
+    # the row is. On a short row it can outvote the row itself.
+    #
+    # wzlxjtu-101's third display is `w_i = \left\{ \begin{array}{rcl} v_c,
+    # && b_i = 1 \\ 0, && b_i = 0 \end{array} \right.`, whose brace is
+    # centred between the two array rows. One span of it holds exactly two
+    # glyphs:
+    #
+    #     braceleftbigg  base=484.31      one  base=476.04
+    #
+    # -- one vote each, and the brace won the tie on insertion order. The
+    # row's baseline became the brace's, `1` was 8.27pt off it, and a
+    # full-size glyph off the row is a refusal: the whole band deferred as
+    # `script-attachment`, taking `v_c, b_i = 1` -- the first case of the
+    # construct -- out of the document.
+    voters = [i for i in main_idx if i not in bigops] or main_idx
     votes = Counter(round(glyphs[i].baseline / max(LEVEL_TOL * size, 0.01))
-                    for i in main_idx)
+                    for i in voters)
     top = votes.most_common(1)[0][0]
     base_line = top * max(LEVEL_TOL * size, 0.01)
     # a full-size glyph that is nonetheless shifted is still a script
@@ -232,11 +287,152 @@ def _attach_scripts(glyphs: list[GlyphNode]):
     # day: whole 34 -> 38. The evidence was always about grouping, never
     # about binding, and that is the distinction three notes have missed.
 
+    # 740 — CLAIMING A LIMIT THAT OVERHANGS ITS OPERATOR WAS TRIED AND
+    # LOSES. Recorded with the numbers, because it is correct in isolation.
+    #
+    # Scripts are claimed from the x-range AFTER a main glyph, which is right
+    # for `x^2` and wrong for a stacked limit: TeX centres the condition under
+    # the operator, so a condition wider than the operator begins to its LEFT.
+    # `\sup_{C^\beta(F_0)}` on wzlxjtu-070 sets `C` at [204.4,210.4] against a
+    # `\sup` at [209.4,227.0] and came out
+    #
+    #     {}_{C}\!\sup_{{}^{\beta}(F_{0})}
+    #
+    # -- the `C` an orphan with an empty base. Claiming script-size glyphs
+    # that overlap the operator horizontally fixes that line exactly, to
+    # `\sup_{C^{\beta}(F_{0})}`. Whole corpus, against the same build:
+    #
+    #     without   whole 47   crops 418   dialect-correct 69
+    #     with      whole 46   crops 422   dialect-correct 67
+    #     below the baseline only   whole 46   crops 422   correct 68
+    #
+    # It takes scripts that belong to the preceding term more often than it
+    # rescues a limit, and restricting it to the lower limit recovers only
+    # half the loss. The shape is real and the rule is not sharp enough to
+    # separate it from an ordinary neighbouring script; that needs to come
+    # from somewhere other than x-overlap.
+
+    # 741 — A LIMIT IS CENTRED ON ITS OPERATOR, SO IT BEGINS TO ITS LEFT.
+    #
+    # Scripts are claimed from the x-range AFTER a main glyph, which is right
+    # for `x^2` and for `\log_2`, and wrong for every operator that takes
+    # LIMITS: TeX centres those below the word, so a condition wider than the
+    # word starts left of it. `\sup_{C^\beta(F_0)}` on wzlxjtu-070 sets `C` at
+    # [204.4,210.4] against a `\sup` at [209.4,227.0], and the `C` became an
+    # orphan with an empty base: `{}_{C}\!\sup_{{}^{\beta}(F_{0})}`.
+    #
+    # 740 tried this for every `bigop` and LOST -- whole 47 -> 46, crops 418
+    # -> 422 -- because `bigop` also covers `\sin`, `\log`, `\tanh`, whose
+    # scripts sit BESIDE them, so claiming backwards stole the preceding
+    # term's scripts. The distinction is not geometric and cannot be
+    # recovered from the page: both are upright roman letter runs. It is a
+    # property of the operator, and LaTeX states it: `texmap.takes_limits`
+    # answers from a table taken out of `amsopn.sty`, where every name is
+    # declared `\qopname\relax m{...}` (movable limits) or `o{...}`. Nothing
+    # here is inferred from the page.
+    # WHICH operator a left-overhanging limit belongs to is decided by the
+    # STREAM, not by x. Two limit operators in one row make x useless:
+    # wzlxjtu-072 sets `\max \biggl( \sup_{t \leq -\eta_{\beta,j}} ...` as
+    #
+    #     s649  m (\max)   x=[135.0,155.3]
+    #     s652  s (\sup)   x=[170.7,187.1]
+    #     s655  t          x=[163.3,166.4]      the condition
+    #     s656  lessequal  x=[166.4,173.0]
+    #
+    # -- the condition BEGINS to the left of the `\sup` it belongs to, and so
+    # falls inside `\max`'s reach; by x alone it went to `\max`. TeX emitted
+    # it after the `\sup`, which is the statement of what it belongs to, and
+    # the nearest limit operator preceding it in the stream is the owner.
+    # DECIDING THE OWNER BY STREAM WAS TRIED AND LOSES, with the numbers here
+    # because the case for it is strong and it is correct on the row it was
+    # built for.
+    #
+    # Two limit operators in one row make x useless. wzlxjtu-072 sets
+    # `\max \biggl( \sup_{t \leq -\eta_{\beta,j}} ...`:
+    #
+    #     s649  m (\max)   x=[135.0,155.3]
+    #     s652  s (\sup)   x=[170.7,187.1]
+    #     s655  t          x=[163.3,166.4]     the condition
+    #
+    # The condition BEGINS left of the `\sup` it belongs to and inside
+    # `\max`'s reach, so by x it goes to `\max`. TeX emitted it after the
+    # `\sup`, and "the nearest limit operator preceding it in the stream"
+    # names the right one. Implemented -- both as the sole test and paired
+    # with a widened x window -- it fixes that display exactly, to
+    # `\max \sup_{t\leq-\eta_{\beta,j}} \{...\}^{+} ; \sup_{...}`, and over
+    # the corpus:
+    #
+    #     x only              whole 50   stacked exact 12   correct 72
+    #     stream names owner  whole 48   stacked exact 10   correct 70
+    #
+    # The stream names an owner for every script in the row, including ones
+    # no operator should claim, and the rule has no way to decline. What it
+    # needs is a notion of where a limit group ENDS, which emission order
+    # does not carry either. Not the binding rule -- the extent.
+    limit_ops = [i for i in main_idx
+                 if i in bigops and texmap.may_take_limits(
+                     glyphs[i].tex.latex, glyphs[i].glyphname)]
+
+    claimed: dict[int, list] = {}
+    for i in limit_ops:
+        ox0, ox1 = glyphs[i].rect[0], glyphs[i].rect[2]
+        for j in range(i - 1, -1, -1):
+            if j in main_idx:
+                break
+            g = glyphs[j]
+            if g.size >= SCRIPT_SIZE_RATIO * size:
+                break
+            # BOTH, not either. The stream names the owner -- which operator
+            # the condition was emitted after -- and that is what x cannot
+            # do when two limit operators share a row: wzlxjtu-072 sets
+            # `\max \biggl( \sup_{t \leq -\eta_{\beta,j}}` with the condition
+            # beginning at 163.3, left of its own `\sup` at 170.7 and inside
+            # `\max`'s reach at 135.0. But the stream alone is too generous:
+            # it names an owner for a glyph anywhere in the row, and trusting
+            # it without a distance cost 2 whole equations and 2 stacked ones.
+            # So the stream decides WHOSE, and x still decides WHETHER -- with
+            # a wider window once the stream has agreed, since `t` falls 1.6pt
+            # short of overlapping the operator it demonstrably belongs to.
+            # 0.25 em of reach, and no more. wzlxjtu-011's fifth display is
+            # `\lim_{\phi^0_0 \rightarrow -\infty} f(\phi^0_0)`, whose `\phi`
+            # is the leftmost glyph of a condition wider than the `\lim` and
+            # falls outside this window -- it is emitted as the orphan
+            # `{}_{\phi}` while the rest of the condition is claimed. Widening
+            # the window to reach it was measured at 1.0 and 2.0 em: both cost
+            # a whole equation and a stacked one (53 -> 52) elsewhere. The
+            # fix for that row is not a bigger window.
+            # EXTENT BY CONTIGUITY once the run has started. The window is
+            # how a condition is RECOGNISED; it is not how far one reaches.
+            # TeX sets the condition as one horizontal list, so its glyphs
+            # abut: wzlxjtu-011's `\lim_{\phi^0_0 \rightarrow -\infty}` has
+            # its `\phi` at [175.1,180.1] against a window opening at 180.3 --
+            # 0.2pt short -- and touching the `0` already claimed at 180.1.
+            # Widening the window instead was measured at 1.0 and 2.0 em and
+            # cost a whole equation each time; adjacency to what is already
+            # claimed costs nothing, because it cannot wander.
+            run = claimed.get(i)
+            if run:
+                nearest = glyphs[run[0]].rect[0]
+                if g.rect[2] < nearest - 0.3 * size:
+                    break
+            elif not (g.rect[2] > ox0 - 0.25 * size and g.rect[0] < ox1):
+                break
+            claimed.setdefault(i, []).insert(0, j)
+
+    stolen = {j for js in claimed.values() for j in js}
     out = []
     for pos, i in enumerate(main_idx):
         nxt = main_idx[pos + 1] if pos + 1 < len(main_idx) else len(glyphs)
         sup, sub = [], []
+        for j in claimed.get(i, []):
+            g = glyphs[j]
+            (sup if g.baseline > glyphs[i].baseline + LEVEL_TOL * size
+             else sub).append(g)
+        last_at = None                   # the list the previous script joined
+        last_sz = None
         for j in range(i + 1, nxt):
+            if j in stolen:
+                continue
             g = glyphs[j]
             # Only a SMALLER glyph may be a script. A full-size glyph sitting
             # off the row baseline is structure this pass does not model --
@@ -246,9 +442,38 @@ def _attach_scripts(glyphs: list[GlyphNode]):
             if g.size >= SCRIPT_SIZE_RATIO * size and j not in bigops:
                 return None
             if g.baseline > glyphs[i].baseline + LEVEL_TOL * size:
-                sup.append(g)
+                sup.append(g); last_at, last_sz = sup, g.size
             elif g.baseline < glyphs[i].baseline - LEVEL_TOL * size:
-                sub.append(g)
+                sub.append(g); last_at, last_sz = sub, g.size
+            elif abs(g.baseline - glyphs[i].baseline) >= 0.05 * size:
+                # A SMALLER GLYPH THAT IS DISPLACED AT ALL is a script, and
+                # which one is the SIGN of the displacement.
+                #
+                # `LEVEL_TOL * size` is how far a FULL-SIZE glyph may stray
+                # and still be on the row. Applied to a script it is simply
+                # too big: wzlxjtu-033 sets `\phi_{\bar z \ldots \bar z}` with
+                # the subscript 1.5pt below a row baseline of 742.63, against
+                # a tolerance of 2.49 -- so a plain subscript fell in the gap
+                # and refused the display. Everything reaching here is already
+                # script-size, having survived the full-size test above; the
+                # only question left is up or down, and the page answers it.
+                (sup if g.baseline > glyphs[i].baseline else sub).append(g)
+                last_at = sup if g.baseline > glyphs[i].baseline else sub
+                last_sz = g.size
+            elif last_at is not None and last_sz and g.size < last_sz - 0.5:
+                # A SECOND-LEVEL SCRIPT sits near the ROW's baseline.
+                #
+                # `\partial_{\phi^0}` lowers the `\phi` to 8pt and then raises
+                # its `0` to 6pt -- and the raise cancels the lower, so the
+                # `0` lands at 528.07 against a row baseline of 527.81. By
+                # level it is neither above the row nor below it, and this
+                # refused the whole display as "same baseline but excluded".
+                #
+                # Its SIZE says what it is. TeX shrinks at every script level
+                # (12 -> 8 -> 6), so a glyph smaller than the script before it
+                # belongs to that script, not to the row, and the recursion
+                # into `to_tex` places it correctly one level down.
+                last_at.append(g); last_sz = g.size
             else:
                 return None              # same baseline but excluded: unclear
         out.append((glyphs[i], sup, sub))
@@ -271,7 +496,9 @@ def _attach_scripts(glyphs: list[GlyphNode]):
     # a wrong `\frac` is worse than a crop, and an honest `{}` is neither.
     if main_idx and main_idx[0] != 0:
         lead_sup, lead_sub = [], []
-        for g in glyphs[:main_idx[0]]:
+        for _j, g in enumerate(glyphs[:main_idx[0]]):
+            if _j in stolen:
+                continue
             if g.size >= SCRIPT_SIZE_RATIO * size:
                 return None              # a full-size leading glyph is structure
             if g.baseline > base_line + LEVEL_TOL * size:
@@ -280,7 +507,12 @@ def _attach_scripts(glyphs: list[GlyphNode]):
                 lead_sub.append(g)
             else:
                 return None
-        return [(None, lead_sup, lead_sub)] + out
+        # Every leading script may have been claimed by a big operator to its
+        # right, in which case there is no leading group left to emit -- and
+        # an empty one crashes the caller on `(sup or sub)[0]`.
+        if lead_sup or lead_sub:
+            return [(None, lead_sup, lead_sub)] + out
+        return out
     return out
 
 
@@ -515,6 +747,111 @@ def _merge_operator_runs(glyphs: list[GlyphNode]) -> list[GlyphNode]:
     return out
 
 
+import os
+
+
+def _merge_radicals(glyphs: list[GlyphNode], rules: list[RuleNode], depth: int):
+    r"""Build `\sqrt{...}` where the radicand is itself a fraction.
+
+    `_merge_overlines` handles the plain root: a radical sign with a VINCULUM
+    over its argument, the vinculum being an `overline` rule starting at the
+    sign's right edge. That covers `\sqrt{\gamma}` and it covered 8 of the 70
+    roots this corpus contains.
+
+    The other 62 are `\sqrt{a \over b}`, and they have NO vinculum to find.
+    Measured on wzlxjtu-025, which sets `x_* = \sqrt{9+2\mu^2 \over 2(8-N_f)}`:
+    page 1 carries nine rule objects in total and exactly one anywhere near
+    the radical --
+
+        radicalBigg  x=[435.9,447.9]  y=[368.1,380.1]
+        LTLine       x=[447.9,500.5]  y=375.52          role "fraction"
+
+    -- which is the radicand's own FRACTION BAR, at mid height, with glyphs
+    above and below it. The producer draws no separate vinculum at all.
+
+    The bar is still decisive about EXTENT: TeX sizes it to the radicand, and
+    it begins exactly at the sign's right edge, 447.9 to 447.9. So the
+    radicand is what lies within the bar's x-range at the sign's height --
+    and the bar is handed DOWN to the recursive call rather than consumed,
+    so the fraction inside the root is still built by the machinery that
+    already builds fractions.
+
+    Without this the radical stayed unpaired, `to_tex` refused the span, and
+    the reading stopped dead at `x_{\ast} =`.
+    """
+    if not rules:
+        return glyphs, set()
+    size = max((g.size for g in glyphs), default=10.0)
+    used: set[int] = set()
+    consumed: set[int] = set()
+    built: dict[int, tuple[str, RuleNode, list[int]]] = {}
+    for i, g in enumerate(glyphs):
+        if i in consumed or not (g.glyphname or "").startswith("radical"):
+            continue
+        for ri, r in enumerate(rules):
+            if r.role != "fraction" or ri in used:
+                continue
+            mid = 0.5 * (r.rect[1] + r.rect[3])
+            if abs(r.rect[0] - g.rect[2]) > 0.6 * size:
+                continue
+            # Measured against the sign's BASELINE, not its box. An
+            # extensible radical's bbox is its hook only: `radicalBigg` on
+            # wzlxjtu-025 reports y=[368.1,380.1], twelve points, while the
+            # display fraction it covers has its bar at 357.13 -- eleven
+            # points BELOW the box supposed to contain it. Testing
+            # containment rejected every root of this shape.
+            if abs(mid - g.baseline) > 2.0 * size:
+                continue
+            # The radicand is what the BAR spans, at the bar's own height:
+            # both halves of the fraction. Taking the window around the sign
+            # instead missed the denominator entirely.
+            inner = [j for j, h in enumerate(glyphs)
+                     if j != i and j not in consumed
+                     and r.rect[0] - 1 <= 0.5 * (h.rect[0] + h.rect[2])
+                     <= r.rect[2] + 1
+                     and abs(h.baseline - mid) <= 2.5 * size]
+            if not inner:
+                continue
+            consumed.add(i)
+            consumed.update(inner)
+            used.add(ri)
+            built[min([i] + inner)] = (i, r, sorted(inner))
+            break
+    if not built:
+        return glyphs, set()
+    out: list[GlyphNode] = []
+    for i, g in enumerate(glyphs):
+        if i in built:
+            si, r, idxs = built[i]
+            body = to_tex([glyphs[k] for k in idxs], [r], depth + 1)
+            if body is None:
+                return glyphs, set()
+            # The SIGN is what the root sits on -- its size and its baseline.
+            # Built from the first radicand glyph instead, the atom inherited
+            # a numerator's 8pt and a numerator's baseline, so `_attach_scripts`
+            # read the whole root as a script of whatever followed it and the
+            # span refused: `\sqrt{\frac{9+2\mu^2}{2(8-N_f)}}` assembled
+            # correctly and was thrown away one pass later.
+            base = glyphs[si]
+            out.append(GlyphNode(
+                id=base.id, page=base.page,
+                rect=(min(glyphs[k].rect[0] for k in idxs),
+                      min(glyphs[k].rect[1] for k in idxs),
+                      max(glyphs[k].rect[2] for k in idxs),
+                      max(glyphs[k].rect[3] for k in idxs)),
+                text=base.text, cid=-1, glyphname=base.glyphname,
+                fontname=base.fontname, family=base.family, size=base.size,
+                tex=TexToken(rf"\sqrt{{{body}}}", "atom", None, "corpus"),
+                matrix=base.matrix, upright=base.upright,
+                stream=min((glyphs[k].stream for k in idxs
+                            if glyphs[k].stream >= 0), default=-1)))
+            continue
+        if i in consumed:
+            continue
+        out.append(g)
+    return out, {id(rules[u]) for u in used}
+
+
 def _merge_overlines(glyphs: list[GlyphNode],
                      rules: list[RuleNode], depth: int):
     """Wrap the glyphs a bar sits over, and report which bars were used.
@@ -646,6 +983,8 @@ def to_tex(glyphs: list[GlyphNode], rules: list[RuleNode] | None = None,
         return None
 
     rules = rules or []
+    glyphs, used_rad = _merge_radicals(glyphs, rules, depth)
+    rules = [r for r in rules if id(r) not in used_rad]
     glyphs, used_bars = _merge_overlines(glyphs, rules, depth)
     # A radical that found no vinculum is still structure this pass cannot
     # describe, and it defers exactly as it always did. The check moved BELOW
@@ -732,6 +1071,29 @@ def to_tex(glyphs: list[GlyphNode], rules: list[RuleNode] | None = None,
             if lit is None:
                 return None
         part = lit
+        # `\limits` WHEN THE PAGE PUTS THEM THERE.
+        #
+        # `\lim_{x}` sets its condition BELOW in display style and BESIDE in
+        # inline style -- same source, two renderings -- and a span projected
+        # here becomes `$...$` or `$$...$$` depending on what the row was.
+        # So `\lim_{...}` alone cannot express what the page shows: an inline
+        # `\lim` whose condition is underneath needs `\lim\limits_{...}`, and
+        # in display `\limits` is what it would have done anyway.
+        #
+        # Emitted whenever the scripts are UNDER the operator rather than
+        # beside it, which is a measurement, not an assumption: their centres
+        # fall within its x-range. The same test the claim above uses.
+        if base is not None and texmap.may_take_limits(
+                base.tex.latex, base.glyphname):
+            # A BESIDE script sits entirely to the RIGHT of the operator; an
+            # UNDER one is centred on it and so begins left of its right edge.
+            # Requiring every script to fall INSIDE the operator was tried and
+            # never fired: a condition is usually WIDER than the word it sits
+            # under -- `\lim` spans [183.3,199.6] while
+            # `\phi^0_0 \rightarrow -\infty` runs [175.1,207.8].
+            marks = sup + sub
+            if marks and min(g.rect[0] for g in marks) < base.rect[2] - 0.1:
+                part += r"\limits"
         bases.append(base if base is not None else (sup or sub)[0])
         if sub:
             s = to_tex(sub, [], depth + 1)

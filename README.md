@@ -7,6 +7,19 @@
 ./pdf2mmd.sh /path/to/book.pdf 1-20   # Convert pages 1-20
 ```
 
+`./pdf2mmd` is a plain launcher that works from any directory and needs no
+arguments beyond the file:
+
+```bash
+./pdf2mmd paper.pdf              # whole document, into ./paper/
+./pdf2mmd paper.pdf 1-6          # just those pages
+./pdf2mmd -c paper.pdf 1-6       # and compile the .tex with xelatex
+```
+
+It exits **2** when the PDF has no text layer on those pages — a scan, which
+a glyph reader cannot help with. See `USAGE.md` for the outputs and for what
+the reader refuses to guess.
+
 ## Files
 
 Put all of these in one folder. They import each other, so a partial copy

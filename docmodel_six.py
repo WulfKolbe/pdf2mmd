@@ -38,6 +38,7 @@ from pdfminer.pdfparser import PDFParser
 from pdfminer.pdftypes import resolve1
 from pdfminer.layout import LTChar, LTCurve, LTImage, LTLine, LTRect
 
+import texmap
 from texmap import (TexToken, family_of, greek_latex, is_drawing, space_class,
                     tex_slot, untrusted_name,
                     is_italic, is_monospace, measure_monospace, project,
@@ -49,8 +50,13 @@ from texmap import (TexToken, family_of, greek_latex, is_drawing, space_class,
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 MATH_FAMILIES = frozenset(
+    # `doublestroke` belongs here for the same reason `fraktur` and `script`
+    # do: it is a MATHS font, every glyph of which is the double-struck form
+    # of a character. Left out, its glyphs landed in TEXT spans, which carry
+    # no LaTeX -- so the eighth `\mathds{1}` of wzlxjtu-026, the one sitting
+    # in an inline formula rather than a display, was dropped with no trace.
     {"math-italic", "math-symbol", "math-extension", "ams-symbol",
-     "fraktur", "script"}
+     "fraktur", "script", "doublestroke"}
 )
 
 Rect = tuple[float, float, float, float]
@@ -308,6 +314,50 @@ def _spans(line: "LineNode") -> list[Span]:
     for _g in ordered:
         if is_monospace(_g.fontname):
             textish.add(id(_g))
+
+    # AN ACCENT BELONGS WITH WHAT IT COVERS, whatever font drew it.
+    #
+    # TeX takes `\bar` from the ROMAN font: wzlxjtu-008 sets `\bar\psi_A` as
+    # `psi` from CMMI12 with a `macron` from CMR12 directly over it. `is_math`
+    # follows the font family, so the accent landed in a TEXT span while its
+    # base stayed in the maths span -- and `_merge_accents` runs inside
+    # `to_tex` on ONE span's glyphs, so the two never met. The reading came
+    # out `\psi \text{¯}`, and the span deferred as `accent-not-composed`:
+    # 47 crops across the corpus, the fourth largest cause.
+    #
+    # The geometry was never in doubt -- the macron spans [261.4,267.3] over
+    # a psi centred at 262.8. It is the span boundary that separated them.
+    for _g in ordered:
+        if _g.tex.kind == "accent":
+            mathish.add(id(_g))
+
+    # AN OVERLAY NEEDS THE GLYPH IT STRIKES, and that glyph is often TEXT.
+    #
+    # `\neq` is drawn as a zero-width `negationslash` plus an `=`, and the `=`
+    # of a relation comes from the roman font. wzlxjtu-014 puts the slash at
+    # x=[347.7,347.7] as the LAST glyph of its maths span with the `=` in the
+    # next span, so `_merge_negations` -- which runs inside `to_tex` on one
+    # span -- never saw the pair and the span deferred as
+    # `overlay-not-composed:negationslash`.
+    #
+    # Both go into the maths span: the overlay, and the one glyph beside it
+    # that it can actually negate.
+    from structure import _NEGATED
+    for _i, _g in enumerate(ordered):
+        if _g.tex.kind != "overlay":
+            continue
+        mathish.add(id(_g))
+        for _j in (_i + 1, _i - 1):
+            if not 0 <= _j < len(ordered):
+                continue
+            _n = ordered[_j]
+            if (_n.glyphname or "") not in _NEGATED:
+                continue
+            gap = (max(_g.rect[0], _n.rect[0])
+                   - min(_g.rect[2], _n.rect[2]))
+            if gap <= 0.35 * max(_g.size, _n.size):
+                mathish.add(id(_n))
+                break
 
     def _ismath(g) -> bool:
         return (g.is_math or id(g) in mathish) and id(g) not in textish
@@ -575,6 +625,42 @@ def _spans(line: "LineNode") -> list[Span]:
             else:
                 runs[best] = sorted(runs[best] + [orph],
                                     key=lambda g: g.rect[0])
+    # 747 -- AN ACCENT MUST NOT BE SEPARATED FROM WHAT IT ACCENTS.
+    #
+    # TeX emits `\hat{F}` as the circumflex and then the letter, adjacent in
+    # the stream and stacked in the page:
+    #
+    #     stream 595  circumflex  x=347.02  base=504.23   run A
+    #     stream 596  F           x=346.15  base=501.34   run B
+    #
+    # A run boundary fell between them, so the accent could never be composed
+    # -- `accent-not-composed:circumflex`, five crops on one page, and with
+    # them four of wzlxjtu-074's six equations, because a display broken by a
+    # crop is emitted as inline fragments instead.
+    #
+    # The evidence that they belong together is not the boundary's to
+    # overrule: the next glyph in the STREAM, sitting UNDER the accent and
+    # centred on it. Moved across, so the accent pass can see its base.
+    for i in range(len(runs) - 1):
+        if not runs[i] or not runs[i + 1]:
+            continue
+        acc = max(runs[i], key=lambda g: g.rect[0])
+        if acc.tex.kind != "accent":
+            continue
+        base = min(runs[i + 1], key=lambda g: g.rect[0])
+        if getattr(base, "stream", -1) < 0 or getattr(acc, "stream", -1) < 0:
+            continue
+        if base.stream != acc.stream + 1:
+            continue                      # not the glyph it was drawn for
+        if abs(0.5 * (base.rect[0] + base.rect[2])
+               - 0.5 * (acc.rect[0] + acc.rect[2])) > 0.6 * acc.size:
+            continue                      # not centred over it
+        if not (acc.baseline > base.baseline):
+            continue                      # an accent sits ABOVE its base
+        runs[i] = [g for g in runs[i] if g is not acc]
+        runs[i + 1] = sorted(runs[i + 1] + [acc], key=lambda g: g.rect[0])
+    runs = [r for r in runs if r]
+
     dominant = max(g.size for g in line.glyphs)
     for n, run in enumerate(runs):
         rect = (min(g.rect[0] for g in run), min(g.rect[1] for g in run),
@@ -716,6 +802,41 @@ def _walk(obj, out: list) -> None:
             _walk(child, out)
 
 
+#: How far above its contents' baseline TeX sets each size of big
+#: delimiter, in ems. Measured; see `key` in the row grouper.
+#: How far above its row's baseline TeX sets each big operator, in ems.
+#: Measured; see `key` in the row grouper. An operator built from letters --
+#: `\cos`, `\max` -- is not raised at all.
+_BIGOP_RAISE = {"summationdisplay": 0.95, "integraldisplay": 1.36}
+
+
+def _bigop_raise(glyphname: str | None) -> float:
+    if not glyphname:
+        return 0.0
+    if glyphname in _BIGOP_RAISE:
+        return _BIGOP_RAISE[glyphname]
+    # the rest of CMEX's display-size operators -- product, coproduct, the
+    # big set operators -- are cut on the same design size as the summation.
+    if glyphname.endswith("display"):
+        return 0.95
+    return 0.0
+
+
+#: Longest suffix first: `parenleftbigg` ends with `bigg`, not `big`.
+_BIG_DELIM_RAISE = (("bigg", 1.41), ("Bigg", 1.71),
+                    ("big", 0.81), ("Big", 1.11))
+
+
+def _big_delim_raise(glyphname: str | None) -> float:
+    """Ems this delimiter is set above the baseline it encloses; 0 if none."""
+    if not glyphname:
+        return 0.0
+    for suffix, ems in _BIG_DELIM_RAISE:
+        if glyphname.endswith(suffix):
+            return ems
+    return 0.0
+
+
 def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
                size: float = 10.0, others: "list[RuleNode]" = ()) -> str:
     """Classify a rule by what sits above and below it.
@@ -726,6 +847,20 @@ def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
     """
     x0, y0, x1, y1 = node.rect
     mid = 0.5 * (y0 + y1)
+
+    # A VINCULUM, named by the sign it starts at. TeX begins the bar exactly
+    # at the radical's right edge, and the bar lies within the sign's own box.
+    # Classified by CONTENT instead, it fails: the window below is 1.2 em and
+    # a radicand can be taller -- wzlxjtu-014's `\sqrt{S_0^2 + S_3^2}` sets its
+    # bar 14.8pt above the row, so nothing was found beneath it, the rule came
+    # back "unknown", and an unaccounted rule defers the whole span.
+    for g in glyphs:
+        if not (g.glyphname or "").startswith("radical"):
+            continue
+        if abs(x0 - g.rect[2]) > 0.6 * max(g.size, 1.0):
+            continue
+        if g.rect[1] - 1 <= mid <= g.rect[3] + 1:
+            return "overline"
 
     # An UNDERSCORE is drawn as a rule, not a glyph. `took_*` reaches the
     # model as a 3.14pt zero-height rule at the baseline followed by an
@@ -768,8 +903,38 @@ def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
     # exactly the geometry of a fraction -- and merging those two rows glued
     # consecutive code lines together: `5 f2(x) = f(x,2)67 xVals, yVals =`.
     # No real fraction bar is tens of ems wide.
+    # 735 -- A FRACTION BAR IS ALLOWED TO BE WIDE.
+    #
+    # This guard was `> 12 em`, to stop a code listing's border being read as
+    # a fraction. But TeX sets the fraction rule AS WIDE AS THE WIDER OF
+    # NUMERATOR AND DENOMINATOR, so a long denominator makes a long bar.
+    # wzlxjtu-045 sets
+    #
+    #     \frac{1}{\sum_{i=1}^{n} I\{D_i=1, M_i=0, T_i=1\}}
+    #
+    # whose bar is 160.2pt in 12pt type -- 13.35 em against a 12 em test. It
+    # failed by 16pt, was called a separator, and WITH NO BAR THERE IS NO
+    # FRACTION: the numerator, the denominator and the head of the equation
+    # stayed three separate bands and one two-row display came apart into
+    # nine pieces.
+    #
+    # So the width alone cannot decide it, and the way out is the same rule
+    # TeX used to draw it: the bar is the width of the wider group, so one of
+    # the two groups must REACH BOTH ITS ENDS. A listing border is the width
+    # of the block and the code inside it is inset from both margins, so
+    # nothing reaches its ends and it is still a separator.
     if (x1 - x0) > 12.0 * max(size, 1.0):
-        return "separator"
+        span = 0.0
+        for side in (1, -1):
+            xs = [g.rect for g in glyphs
+                  if 0 < side * (g.baseline - mid) < window
+                  and x0 - 1 <= 0.5 * (g.rect[0] + g.rect[2]) <= x1 + 1]
+            if not xs:
+                continue
+            reach = max(r[2] for r in xs) - min(r[0] for r in xs)
+            span = max(span, reach / max(x1 - x0, 1.0))
+        if span < 0.85:
+            return "separator"
 
     # A VERTICAL rule is not a fraction bar, an overline or a radical
     # vinculum -- all of those lie across the text. It is a frame edge or a
@@ -864,7 +1029,42 @@ def _rule_role(node: RuleNode, glyphs: list[GlyphNode],
     # A numerator must be its OWN row; an overline's base need only sit under
     # the bar. The asymmetry is the point: distance cannot separate the two
     # cases, and extent can, but only on the side where TeX constrains it.
-    above = _is_own_row(above_b)
+    def _script_fraction() -> bool:
+        r"""A `\frac{1}{2}` set in an exponent, judged LOCALLY.
+
+        742 -- wzlxjtu-091 sets eight `(pq)^{\frac12}` on one row. All eight
+        bars are 3.7pt wide, all at y=614.7, all with `above_b=[616.0]` and
+        `below_b=[609.6]` -- IDENTICAL EVIDENCE -- and `_is_own_row` called
+        the first a fraction and the other seven overlines.
+
+        It is not inconsistent, it is non-local: `_is_own_row` counts the
+        glyphs on the numerator's baseline that fall OUTSIDE this bar within
+        six ems, to catch a text line running across. In a row packed with
+        other superscripts there is always something out there, so the
+        verdict turns on which neighbours happen to be in range. Seven
+        `\frac12` became `\overline{}` and every span holding one refused:
+        `fraction` 8 and `fraction+overline` 6 on that page alone.
+
+        What a text line running over a bar CANNOT do is be set at script
+        size. TeX sets a fraction inside an exponent smaller than the type
+        around it, and it sets the rule to the width of its parts. So:
+        material above AND below, both contained by the bar, both smaller
+        than the surrounding type, is a fraction -- and no neighbour can
+        change that answer.
+        """
+        if not (above_b and below_b):
+            return False
+        small = 0.8 * max(size, 1.0)
+        for side in (above_b, below_b):
+            want = max(set(side), key=side.count)
+            near = [g for g in glyphs
+                    if abs(g.baseline - want) <= 0.1 * max(size, 1.0)
+                    and x0 - 1 <= 0.5 * (g.rect[0] + g.rect[2]) <= x1 + 1]
+            if not near or max(g.size for g in near) >= small:
+                return False
+        return True
+
+    above = _is_own_row(above_b) or _script_fraction()
     below_row = _is_own_row(below_b)
     if above and (below_row or below_b):
         return "fraction"
@@ -922,6 +1122,14 @@ def merge_fragments(glyphs: list[GlyphNode]) -> tuple[list[GlyphNode], int]:
                 glyphname=name, fontname=group[0].fontname,
                 family=group[0].family, size=group[0].size,
                 tex=TexToken(latex, kind, None, group[0].tex.confidence),
+                # A reassembled delimiter keeps the EARLIEST index of the
+                # pieces it was built from. Without it the glyph reads -1,
+                # and one such glyph makes a whole row fall off every path
+                # that needs emission order -- which is why wzlxjtu-072's
+                # third display still resolved its limits by x while the
+                # fourth, with no extensible delimiter in it, did not.
+                stream=min((g.stream for g in group if g.stream >= 0),
+                           default=-1),
             )
         )
     out = sorted(rest + merged, key=lambda g: (g.rect[0], g.rect[1]))
@@ -1176,34 +1384,77 @@ def _line_bands(path: str, pages) -> dict[int, list[float]]:
 def _stream_index(path: str, pages) -> dict[int, dict[tuple, int]]:
     """Content-stream position for every glyph, keyed by page and position.
 
-    Read in a second pass with layout analysis OFF, because pdfminer's
-    analysis reorders glyphs into its own idea of lines and boxes -- throwing
-    away the one ordering the producer actually asserted. The key is the pen
-    position and the character, which is unique on a page in practice.
+    Recorded at `render_char`, which is the interpreter's own callback and
+    therefore the producer's order exactly.
+
+    746 -- IT USED TO WALK `extract_pages(laparams=None)`, on the reasoning
+    that switching layout analysis off leaves the producer's order alone. It
+    does not, and it goes wrong at the one place that matters. wzlxjtu-006
+    draws a fraction like this:
+
+        [(+)]TJ 12.956 8.088 Td [(1)]TJ     <- numerator
+        ET
+        q  1 0 0 1 193.406 525.446 cm
+           []0 d 0 J 0.478 w 0 0 m 5.853 0 l S      <- the bar, a STROKED LINE
+        Q
+        BT
+        /F15 11.9552 Tf 193.406 514.256 Td [(8)]TJ  <- denominator, absolute
+        /F20 11.9552 Tf 7.049 8.201 Td [(me)]TJ ...
+
+    The text object is ENDED and RESTARTED around the rule, because the rule
+    is a path and paths cannot be drawn inside one. Compare the two readings
+    of the glyphs after that `+`:
+
+        render_char      +  1  8  m  e  -  6  sigma  [  -  3  2
+        extract_pages    +  [  m  e  -  6  sigma  1  8  -  3  2
+
+    The numerator and denominator are moved SEVEN PLACES LATER and the big
+    bracket seven places earlier. A fraction and a big delimiter are exactly
+    what a BT/ET boundary wraps, so the index was wrong precisely where the
+    layout is hard -- and every pass that trusts it (the row sort of 741, the
+    script-band merge, the sandwich of 744) inherited that.
+
+    The key is the pen position and the character, which is unique on a page
+    in practice.
     """
+    from pdfminer.converter import PDFLayoutAnalyzer
+    from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
+
     out: dict[int, dict[tuple, int]] = {}
+
+    class _Recorder(PDFLayoutAnalyzer):
+        """Records every glyph in the order the interpreter draws it."""
+
+        def __init__(self, rm):
+            super().__init__(rm, pageno=1, laparams=None)
+            self.seen: dict[tuple, int] = {}
+            self.n = 0
+
+        def render_char(self, matrix, font, fontsize, scaling, rise, cid,
+                        *args, **kw):
+            w = super().render_char(matrix, font, fontsize, scaling, rise,
+                                    cid, *args, **kw)
+            try:
+                text = font.to_unichr(cid)
+                if not isinstance(text, str):
+                    raise TypeError
+            except Exception:
+                text = "(cid:%d)" % cid
+            key = (round(matrix[4], 1), round(matrix[5], 1), text)
+            if key not in self.seen:
+                self.seen[key] = self.n
+            self.n += 1
+            return w
+
     try:
-        for idx, layout in enumerate(extract_pages(path, page_numbers=pages,
-                                                   laparams=None)):
-            pno = (list(pages)[idx] + 1) if pages is not None else idx + 1
-            seen: dict[tuple, int] = {}
-            n = 0
-
-            def walk(obj):
-                nonlocal n
-                if isinstance(obj, LTChar):
-                    key = (round(obj.matrix[4], 1), round(obj.matrix[5], 1),
-                           obj.get_text())
-                    if key not in seen:
-                        seen[key] = n
-                    n += 1
-                elif hasattr(obj, "__iter__"):
-                    for child in obj:
-                        walk(child)
-
-            for element in layout:
-                walk(element)
-            out[pno] = seen
+        with open(path, "rb") as fh:
+            want = None if pages is None else set(pages)
+            for i, page in enumerate(PDFPage.get_pages(fh, pagenos=want)):
+                pno = (sorted(want)[i] + 1) if want is not None else i + 1
+                rm = PDFResourceManager()
+                rec = _Recorder(rm)
+                PDFPageInterpreter(rm, rec).process_page(page)
+                out[pno] = rec.seen
     except Exception:
         return {}
     return out
@@ -1408,8 +1659,32 @@ def _column_edge(rows: list[list["GlyphNode"]], rect: Rect) -> float | None:
     for k, n in ordered:
         # a second mode, well to the right of the first and past the middle,
         # carrying a real share of the rows
+        # 748 -- A SECOND COLUMN CARRIES A REAL SHARE OF THE PAGE'S ROWS.
+        #
+        # The test was `n >= 0.1 * ordered[0][1]` -- a tenth of the FIRST
+        # CANDIDATE's own count, which is itself often 1, so any single piece
+        # of evidence passed. One display equation's internal `\quad` counts
+        # here (a row that spans both columns contributes the x after its
+        # widest gap), and on wzlxjtu-058 that produced a gutter at x=280.8
+        # on a ONE-COLUMN page whose text runs 85..510 unbroken.
+        #
+        # What it cost: every row straddling 280.8 was cut. The denominator
+        # of equation 4 is `p_{0|0} - p_{0|1}`, drawn as one stream run
+        # 403..411; the cut took `p_{0|0}` into one row and `- p_{0|1}` into
+        # another, and the equation came out
+        #
+        #     \frac{p_{0\mid0}}{- p} E[...]  \\  p 0|0 0|1
+        #
+        # Equation 3 of the same page, identical but for a `+` instead of the
+        # `-`, is correct -- its gap at the gutter is 3.4pt against this
+        # one's 5.0pt, and that is the whole difference between them.
+        #
+        # Measured against the SAME mode the `strong` set above uses: the two
+        # columns of a real two-column page carry almost the same number of
+        # rows (the comment above says 43 and 43). Here the page's dominant
+        # mode has 7 rows and the accepted "column" had 1.
         if k > first + 0.25 * (rect[2] - rect[0]) and k > mid * 0.9 \
-                and n >= 0.1 * ordered[0][1]:
+                and n >= 2:
             # A SMALL margin left of the second column, not the midpoint to
             # the first column's widest line. The midpoint is computed from
             # rows that may still be fragments at this stage, and it landed
@@ -1922,8 +2197,62 @@ def _group_lines(glyphs: list[GlyphNode],
     def key(g: "GlyphNode") -> float:
         # A big operator carrying limits is raised above the text baseline so
         # that operator and limits centre on the maths axis.
+        #
+        # 750 -- BY HOW MUCH DEPENDS ON THE OPERATOR, and it was one blanket
+        # 0.7 em for all of them. Measured over 60 documents, as the raise
+        # above the baseline of the nearest full-size glyph beside it:
+        #
+        #     summationdisplay   n=18   0.95 em   (17 of 18 exactly)
+        #     integraldisplay    n=14   1.361 em  (10 of 14 exactly)
+        #     c P l m s d t e k i        0.000 em  (exact, 100+ samples)
+        #
+        # The last row is every operator built from LETTERS -- `\cos`, `\max`,
+        # `\sup`; the merge marks the head letter `bigop`, and it sits on the
+        # ordinary baseline like the text it is. Lowering it 0.7 em was
+        # moving it off its own row.
+        #
+        # An integral is raised HALF AN EM MORE than a sum, which is why one
+        # constant could not serve both: wzlxjtu-024 sets
+        # `\int dx\,\rho(x) = 1` with the integral at baseline 446.22 and its
+        # body at 431. Corrected by 0.7 em the integral keys to 437.8 and
+        # landed in the PROSE LINE above -- "...normalized as" -- so the
+        # equation came out as `dx \rho(x) = 1` with no integral at all.
+        #
+        # The box centre was tried instead of a table, since TeX centres these
+        # on the maths axis: it fits the letter operators (0.06 em, tight) and
+        # NOT the CMEX ones (sum 1.05, int 1.23), because pdfminer's box for a
+        # CMEX glyph does not report its real depth. Measured, not assumed.
         if g.tex.kind == "bigop":
-            return g.baseline - 0.7 * g.size
+            return g.baseline - _bigop_raise(g.glyphname) * g.size
+        # 743 -- AND SO IS A BIG DELIMITER, BY A MEASURED AMOUNT.
+        #
+        # `\bigl(` is set on the maths axis, not on the baseline of what it
+        # encloses, so baseline clustering put a row's big parentheses ONE
+        # BAND ABOVE their own contents. When the contents happened to fall
+        # in the same merged band it worked; when the band boundary fell
+        # between them the delimiters were orphaned and came out as EMPTY
+        # PAIRS -- `\bigl( \bigr)\bigl( \bigr)` with the mathematics gone.
+        # 75 of those over the corpus, in 14 documents.
+        #
+        # wzlxjtu-093's first line is the clean case: everything below its
+        # fraction bar is TEN DELIMITERS AND NOTHING ELSE, on baseline 670.0,
+        # while the denominator they enclose sits on 660.3 in the next band.
+        #
+        # MEASURED over the corpus, as the raise in ems of a delimiter above
+        # the nearest full-size glyph beside it:
+        #
+        #     big    n=67   0.81 em   (39 of 67 exactly)
+        #     Big    n=12   1.11 em   ( 9 of 12 exactly)
+        #     bigg   n=37   1.41 em
+        #     Bigg   n=2    1.71 em
+        #
+        # 0.81, 1.11, 1.41, 1.71 -- a step of 0.30 em per size, which is how
+        # TeX grows \big \Big \bigg \Bigg. The table is that progression, not
+        # four independent constants.
+        if g.tex.kind == "delimiter":
+            raise_em = _big_delim_raise(g.glyphname)
+            if raise_em:
+                return g.baseline - raise_em * g.size
         return g.baseline
 
     # Compare against each row's FIRST glyph, not a running mean, and take
@@ -2107,13 +2436,22 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                     gname = verified
                 elif untrusted_name(o.fontname, gname):
                     gname = None
+                if not gname:
+                    # A subsetted CM font can arrive with no names at all, and
+                    # the CID still carries the identity -- the CM encodings
+                    # are fixed. See `texmap.CM_ENCODING`, built from the 102
+                    # documents that DO name these glyphs (391 pairs, none
+                    # ambiguous). Without it a page re-rendered through
+                    # MathPix deferred 24 of its 36 maths spans on `\partial`,
+                    # `\prime` and `-`.
+                    gname = texmap.cm_glyphname(o.fontname, o.cid)
                 glyphs.append(
                     GlyphNode(
                         id=f"p{pno}g{n}", page=pno,
                         rect=_sane_rect(o.bbox, o.matrix[5], o.size),
                         text=o.get_text(), cid=o.cid, glyphname=gname,
                         fontname=o.fontname, family=fam, size=o.size,
-                        tex=project(fam, gname), matrix=o.matrix,
+                        tex=project(fam, gname, o.cid, o.fontname), matrix=o.matrix,
                         upright=bool(o.upright),
                         color=to_rgb(getattr(
                             getattr(o, "graphicstate", None), "ncolor", None)),
@@ -2270,7 +2608,30 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
         # either side of a gap -- what they do not have is a raised glyph
         # occupying it. That is the difference, and it is the evidence used.
         def _bl(grp):
-            return sum(g.baseline for g in grp) / len(grp)
+            r"""The row's OWN baseline: the one its full-size glyphs sit on.
+
+            The mean over every glyph is not that. wzlxjtu-006's second
+            display holds
+
+                base 526.06  'i 2 2sigma 1 8 -6sigma [ 4sigma cosh x5'
+                base 521.62  'V(sigma,phi)=-ge+me(-32ge'
+
+            which is ONE row: the five `\cosh` are 12pt and sit on 521.62 with
+            the `V`, and 526.06 is a mean dragged up by 8pt scripts and by the
+            fraction rows the bar merge pulled in. Comparing means put the two
+            halves 4.44pt apart and no rejoin fired, so the row was emitted as
+            a display block of scripts and an INLINE span holding its own
+            beginning -- `$V (\sigma, \phi ) = -g e + me \biggl( - 32ge$`.
+            """
+            # FULL-SIZE glyphs only. `_dominant_baseline` takes the mode over
+            # every glyph, and in a band that is mostly scripts the mode IS
+            # the script line: the band above holds nine 8pt script glyphs
+            # against eight 12pt ones, so it reported 527.40 where its own
+            # `\cosh`es sit at 522.50 with the `V`, and the two halves stayed
+            # 4.90pt apart against a 1.80pt tolerance.
+            big = max(g.size for g in grp)
+            full = [g for g in grp if g.size >= 0.95 * big]
+            return _dominant_baseline(full or grp)
 
         _changed = True
         while _changed:
@@ -2284,22 +2645,61 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                     a, b = groups[_i], groups[_j]
                     if abs(_bl(a) - _bl(b)) > 0.15 * span_pt:
                         continue
+                    ax0 = min(g.rect[0] for g in a)
                     ax1 = max(g.rect[2] for g in a)
                     bx0 = min(g.rect[0] for g in b)
-                    if not (0 <= bx0 - ax1 <= 5.0 * span_pt):
+                    bx1 = max(g.rect[2] for g in b)
+                    # negative when the two INTERLEAVE in x
+                    gap = max(bx0 - ax1, ax0 - bx1)
+                    if gap > 5.0 * span_pt:
                         continue
                     filler = False
                     for _k in range(len(groups)):
                         if _k in (_i, _j) or not groups[_k]:
                             continue
+                        # The filler must REACH INTO the gap, not begin in
+                        # it. Testing where it starts missed every script
+                        # band, because a superscript begins back over the
+                        # term it belongs to: wzlxjtu-096 sets
+                        # `\mathfrak{D}^{\mathfrak{J}_B,(1,0;AB^{-1})}
+                        # T_{\mathfrak{J}_D}(z)` with
+                        #
+                        #   D and its subscript   x=[245.6, 266.0]
+                        #   the superscript       x=[255.6, 311.4]
+                        #   T(z),                 x=[311.9, 348.7]
+                        #
+                        # -- one row, whose two full-size halves sit 46pt
+                        # apart with the superscript spanning the space
+                        # between them. The superscript starts at 255.6,
+                        # inside the left half, so "begins in the gap" found
+                        # nothing and the row was printed as two.
                         kx0 = min(g.rect[0] for g in groups[_k])
-                        if not (ax1 - 1 <= kx0 <= bx0 + 1):
+                        kx1 = max(g.rect[2] for g in groups[_k])
+                        if not (kx1 > ax1 and kx0 < bx0):
                             continue
                         if abs(_bl(groups[_k]) - _bl(a)) <= 2.5 * span_pt:
                             filler = True
                             break
-                    if not filler:
-                        continue
+                    # A filler is needed only when something STANDS IN the
+                    # gap -- the raised-operator case this was written for.
+                    # Two halves of a row that are merely adjacent have no
+                    # filler between them, and they do not need one: sharing
+                    # the row's own baseline, both carrying mathematics, and
+                    # separated by less than a quad is already decisive.
+                    # Prose columns share baselines too, but they are text and
+                    # the gutter between them is far wider than that.
+                    # Overlapping in x and sharing the row's own baseline is
+                    # not adjacency at all -- it is the same row, written
+                    # twice by the grouper. wzlxjtu-006's second display puts
+                    # the superscripts of `V(\sigma,\phi^i) = -g^2e^{2\sigma}`
+                    # directly ABOVE it, so the two bands interleave and an
+                    # adjacency test can never see them as one.
+                    if gap > 0 and not filler:
+                        if gap > 3.0 * span_pt:
+                            continue
+                        if not (any(g.is_math for g in a)
+                                and any(g.is_math for g in b)):
+                            continue
                     groups[_i] = a + b
                     groups[_j] = []
                     _changed = True
@@ -2333,9 +2733,32 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                     other = groups[_j]
                     if _j == _gi or not other:
                         continue
-                    if not all(bx0 - 0.75 * bw
-                               <= 0.5 * (g.rect[0] + g.rect[2])
-                               <= bx1 + 0.75 * bw for g in other):
+                    # 740 -- CENTRED ON THE OPERATOR, NOT CONTAINED BY IT.
+                    #
+                    # TeX centres a limit on its operator and lets it be as
+                    # wide as it needs to be. Containment therefore fails
+                    # exactly when the limit is the interesting one:
+                    # wzlxjtu-030 sets
+                    #
+                    #     \sum_{u=1,2,3}^{s+t-|s-t|-1}
+                    #
+                    # whose operator is 14.4pt wide and whose limits are 27.5
+                    # and 47.0 -- and all three centres are 421.6 TO THE
+                    # TENTH OF A POINT. The upper limit was refused, stayed a
+                    # band of its own, and then CAPTURED the operator in the
+                    # furniture pass below, so the whole `\sum` was carried
+                    # out of its equation and emitted as a second row.
+                    #
+                    # The containment test is kept as the other way in: a
+                    # limit narrower than its operator satisfies it and need
+                    # not be centred to the same tolerance.
+                    ocx = 0.5 * (min(g.rect[0] for g in other)
+                                 + max(g.rect[2] for g in other))
+                    centred = abs(ocx - 0.5 * (bx0 + bx1)) <= 0.5 * bw
+                    if not centred and not all(
+                            bx0 - 0.75 * bw
+                            <= 0.5 * (g.rect[0] + g.rect[2])
+                            <= bx1 + 0.75 * bw for g in other):
                         continue
                     # The vertical window is scaled to the OPERATOR, and it
                     # is deliberately generous, because the two tests either
@@ -2404,9 +2827,24 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                    for g in groups[_i]):
                 continue
             ox0 = min(g.rect[0] for g in ops)
+            osz = max(g.size for g in ops)
             host, host_d = None, 2.5 * span_pt
             for _j in range(len(groups)):
                 if _j == _i or not groups[_j]:
+                    continue
+                # 740 -- A LIMIT ROW IS NOT A HOST.
+                #
+                # The host is chosen by NEAREST BASELINE, and an operator's
+                # own limit is nearer to it than the row it stands in:
+                # wzlxjtu-030's `\sum` sits at 447.5, its upper limit at
+                # 451.3 and its equation at 438.0, so the operator was
+                # rejoined to its own superscript -- 3.8pt away against 9.5
+                # -- and the pair left the equation together.
+                #
+                # A limit is set at SCRIPT SIZE; a row has full-size glyphs
+                # in it. That is the same test the stacked-limit merge above
+                # uses to tell a limit from a second equation.
+                if max(g.size for g in groups[_j]) < 0.95 * osz:
                     continue
                 jx0 = min(g.rect[0] for g in groups[_j])
                 jx1 = max(g.rect[2] for g in groups[_j])
@@ -2488,7 +2926,25 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
         # row, so the destination is the row most of its bases are in.
         _idx = sorted(((g.stream, _j) for _j, grp in enumerate(groups)
                        for g in grp if g.stream >= 0))
-        _mode = os.environ.get("PDF2MMD_SCRIPTBAND", "unanimous")
+        # PER GLYPH by default since 736. It was "unanimous" -- place a band
+        # only when every glyph of it names the same destination row -- because
+        # splitting a band per glyph measured worse. That reason is gone: it
+        # measured worse by CREATING LEADING SCRIPTS, a row beginning with a
+        # script whose base had moved elsewhere, and that refused the whole
+        # display until 735 gave it the `{}` base LaTeX already has for it.
+        #
+        # Unanimity also cannot place the common case. wzlxjtu-005's fourth
+        # display sets three rows and ONE raised band across them:
+        #
+        #   base 289.67  13 glyphs, all 8pt   I I r i mu B I i s e mu B I B
+        #   base 284.12  23 glyphs            row 2
+        #   base 283.94  17 glyphs            row 3
+        #
+        # The band serves two rows, so the stream names two destinations and
+        # unanimity placed none of it -- every superscript in the display
+        # silently gone, `\lambda^I_A` read as `\lambda_A`. A dropped symbol
+        # is worse than a refusal because nothing marks it.
+        _mode = os.environ.get("PDF2MMD_SCRIPTBAND", "perglyph")
         if _idx and _mode != "off":
             import bisect as _bisect
             _keys = [s for s, _ in _idx]
@@ -2540,6 +2996,86 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                     groups[dest] = groups[dest] + [g]
                 groups[_i] = [g for g in grp if id(g) not in gone]
 
+        # 744 -- A GLYPH SANDWICHED IN THE STREAM BELONGS TO ITS NEIGHBOURS.
+        #
+        # The pass above rescues a band that is ENTIRELY scripts. It cannot
+        # help a script that was absorbed into a full-size row, because it
+        # skips any group holding full-size glyphs -- and that is the case
+        # that produces a WRONG READING rather than a missing one.
+        #
+        # wzlxjtu-009's `M` rows:
+        #
+        #     stream 1698  'e'  base 152.72   row M_3
+        #     stream 1699  'sigma'  base 157.66   row M_0   <- wrong
+        #     stream 1700  'sin'  base 152.72   row M_3
+        #     stream 1703  'phi'  base 152.72   row M_3
+        #     stream 1704  '3'  base 157.66   row M_0       <- wrong
+        #     stream 1708  '('  base 152.72   row M_3
+        #
+        # Those two are the superscripts of `e^{\sigma}` and `\phi^3` on the
+        # LOWER row. They sit 4.94pt above it and 12.5pt below the row above,
+        # so they are nearer to where they belong -- and went to the other
+        # one anyway. The reading came out
+        #
+        #     M_0 = 2m e^{-3\sigma} \cos \phi_{\sigma}^{3} \sinh \phi_{3}^{0}
+        #     M_3 = -2ig e \sin \phi
+        #
+        # two invented subscripts on one row and two superscripts missing
+        # from the next. Nothing marks either.
+        #
+        # The stream is unambiguous where position is not: each stray sits
+        # BETWEEN two glyphs of the row it belongs to. Both neighbours must
+        # agree -- one would be an adjacency, two is a sandwich -- and the
+        # glyph must be script-size, so this moves scripts and never prose.
+        if _idx:
+            import bisect as _bisect
+            # Index carries the BASELINE too, because a stream neighbour is
+            # not always a neighbour on the page: TeX emits an equation's
+            # NUMBER after its body, so the glyph following `\phi` in the
+            # stream can be the `(` of a tag 163pt up the page. Those are
+            # skipped when looking for the sandwich -- the neighbour has to
+            # be on the same band to say anything about this glyph.
+            _nb = sorted((g.stream, _j, g.baseline)
+                         for _j, grp in enumerate(groups)
+                         for g in grp if g.stream >= 0)
+            _sk = [s for s, _, _ in _nb]
+            _moves = []
+
+            def _side(k, step, base):
+                k += step
+                while 0 <= k < len(_nb):
+                    if abs(_nb[k][2] - base) <= 2.0 * span_pt:
+                        return _nb[k][1]
+                    k += step
+                return None
+
+            for _i, grp in enumerate(groups):
+                if not grp:
+                    continue
+                for g in grp:
+                    if g.stream < 0 or g.size >= 0.95 * span_pt:
+                        continue
+                    k = _bisect.bisect_left(_sk, g.stream)
+                    if k >= len(_nb) or _nb[k][0] != g.stream:
+                        continue
+                    before = _side(k, -1, g.baseline)
+                    after = _side(k, +1, g.baseline)
+                    if before is None or before != after or before == _i:
+                        continue
+                    if not groups[before]:
+                        continue
+                    db = (sum(x.baseline for x in groups[before])
+                          / len(groups[before]))
+                    if abs(db - g.baseline) > 2.0 * span_pt:
+                        continue
+                    _moves.append((before, _i, g))
+            if _moves:
+                _gone = {id(g) for _, _, g in _moves}
+                for dest, _, g in _moves:
+                    groups[dest] = groups[dest] + [g]
+                for _i in {src for _, src, _ in _moves}:
+                    groups[_i] = [g for g in groups[_i] if id(g) not in _gone]
+
         keep = [i for i, g in enumerate(groups) if g]
         remap = {old: new for new, old in enumerate(keep)}
         groups = [groups[i] for i in keep]
@@ -2566,6 +3102,41 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                         mine.append(r)
                     continue
                 mid = 0.5 * (r.rect[1] + r.rect[3])
+                # A VINCULUM BELONGS TO ITS RADICAL, at any height.
+                #
+                # The baseline window below is 0.8 em, which fits an overline
+                # on running text. A `\sqrt`'s bar sits as high as its
+                # radicand is tall: wzlxjtu-014's `W = \sqrt{S_0^2 + S_3^2}`
+                # puts it 14.8pt above a row baseline of 664.20, so the line
+                # was handed NO rules at all and the radical deferred as an
+                # unmapped glyph, taking the equation with it.
+                #
+                # Widening the window generally was tried before and cost two
+                # display blocks. This needs no window: TeX starts the bar
+                # exactly at the sign's right edge -- 296.4 to 296.4, measured
+                # -- and nothing else in a row does that.
+                #
+                # 751 -- AND IT MUST BE ITS OWN RADICAL'S. x alone identifies
+                # the bar only while one radical on the page starts there.
+                # wzlxjtu-024 sets `\sqrt{2}` in equation 5 and again in
+                # equation 6, at x=302.79 and x=301.64 -- close enough that
+                # each equation's bar abutted BOTH signs, so equation 5's
+                # line was handed a rule from y=158.13, ninety points below
+                # it, and equation 6's was handed one from y=275.19.
+                # Unaccounted rules on both: `fraction+overline+unmapped`,
+                # and both equations became crops.
+                #
+                # TeX draws the vinculum at the TOP of the sign, inside its
+                # box. That is the test `_rule_role` already applies to the
+                # same decision, and applying it here too costs nothing that
+                # the x test was buying -- the sign is still what names the
+                # bar, it just has to be a sign that is actually there.
+                if any((g.glyphname or "").startswith("radical")
+                       and abs(r.rect[0] - g.rect[2]) <= 0.6 * max(g.size, 1.0)
+                       and g.rect[1] - 1 <= mid <= g.rect[3] + 1
+                       for g in group):
+                    mine.append(r)
+                    continue
                 # A bar BELOW the baseline cannot belong to this line: an
                 # overline goes above what it covers. Two such rules from the
                 # line below were being attached here and deferred a span
@@ -2584,6 +3155,25 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                         and abs(mid - base) <= 0.8 * span_pt):
                     mine.append(r)
             is_math = any(g.is_math for g in group) or bool(mine)
+            # 741 -- A MERGED BAND IS IN MERGE ORDER, WHICH IS NO ORDER.
+            #
+            # Every band merge here concatenates: `groups[host] + groups[_i]`.
+            # The result is whatever order the passes happened to run in, and
+            # it reaches `to_tex` as the sequence of the line. wzlxjtu-092's
+            # denominator row runs stream 438..484 and then JUMPS BACK to
+            # 471..483 -- the script band was appended after the delimiter
+            # band, so every big delimiter ended up adjacent to another big
+            # delimiter and the output carried `\bigl( \bigr)\bigl( \bigr)`
+            # with the contents gone.
+            #
+            # Restored to the order THE PDF DREW THEM IN, which is the order
+            # TeX emitted them, which is reading order. Not x: a superscript
+            # is drawn where it belongs in the expression and sits above the
+            # base that precedes it, and sorting by position is what loses
+            # that. The stream index is the evidence; x is the fallback for a
+            # page where some glyph lacks one.
+            if all(getattr(g, "stream", None) is not None for g in group):
+                group = sorted(group, key=lambda g: g.stream)
             page.lines.append(
                 LineNode(
                     id=f"p{pno}l{len(page.lines)}", page=pno,
@@ -2917,15 +3507,41 @@ def span_reason(sp: Span) -> str:
     """
     from structure import _attach_scripts, _split_fractions
 
-    unmapped = [g for g in sp.glyphs if glyph_latex(g) is None]
+    # RUN THE MERGES FIRST. This checked the RAW glyphs, so a span holding an
+    # accent reported `accent-not-composed` whether or not the accent had
+    # composed -- `glyph_latex` returns None for an accent by design, which is
+    # what step 1 looks for. wzlxjtu-033 reported 13 of its 15 crops that way
+    # while `_merge_accents` was consuming every one of its `\bar{z}`
+    # (20 glyphs in, 15 out) and the refusal was somewhere else entirely.
+    #
+    # The docstring above promises the pass that ACTUALLY returned None,
+    # established by running them. Step 1 was the one place that did not.
+    from structure import (_merge_accents, _merge_mapsto, _merge_negations,
+                           _merge_operator_runs)
     ordered = sorted(sp.glyphs, key=lambda g: g.rect[0])
+    try:
+        probe = _merge_operator_runs(_merge_accents(_merge_negations(
+            _merge_mapsto(list(ordered))), 0))
+    except Exception:
+        probe = ordered
+    unmapped = [g for g in probe if glyph_latex(g) is None]
 
     # 1a. an ACCENT is not an unmapped glyph. It has its LaTeX and is waiting
     #     to be composed with a base; `glyph_latex` returns None for it by
     #     design. Reporting it as unmapped sent 23 `circumflex` to the
     #     "add it to the table" pile when it was already in the table.
+    # 752 -- A RADICAL SIGN IS NOT AN UNMAPPED GLYPH.
+    #
+    # `radicalbig` projects to `\sqrt` perfectly well; `glyph_latex` returns
+    # None for it because a radical needs COMPOSITION with its vinculum, the
+    # same as an accent needs its base. The kind is "rule" and this list did
+    # not have it, so eleven of them over the corpus -- `radicalBig` 5,
+    # `radicalbig` 4, `radicalBigg` 2 -- were reported as MISSING FROM THE
+    # GLYPH TABLE. That is a wrong diagnosis pointing at the wrong file, and
+    # it is the third time this list has been short: 15 accents were
+    # mislabelled the same way before "accent" was added to it.
     pending = [g for g in unmapped if g.tex.kind in ("accent", "overlay",
-                                                     "fragment")]
+                                                     "fragment", "rule")]
     truly = [g for g in unmapped if g not in pending]
     if truly:
         names = sorted({(g.glyphname or g.text or "?") for g in truly})
@@ -2933,7 +3549,9 @@ def span_reason(sp: Span) -> str:
     if pending:
         kinds = sorted({g.tex.kind for g in pending})
         names = sorted({(g.glyphname or "?") for g in pending})
-        return f"{kinds[0]}-not-composed:" + ",".join(names[:3])
+        # every "rule" glyph is a radical sign; say so rather than "rule".
+        label = "radical" if kinds[0] == "rule" else kinds[0]
+        return f"{label}-not-composed:" + ",".join(names[:3])
 
     # 2. a rule no pass models
     unmodelled = sorted({r.role for r in sp.rules

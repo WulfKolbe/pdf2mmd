@@ -101,3 +101,39 @@ class TestProvideCommands:
         line is harmless when the real definition is present."""
         for body in T.PROVIDE.values():
             assert body.startswith(r"\providecommand")
+
+
+# --- 733: characters the text font does not have ------------------------------
+#
+# Prose does not go through `texmap`. A glyph the PDF's ToUnicode names is
+# written into the `.tex` as itself, and LaTeX only WARNS when the font lacks
+# it -- the character vanishes and the document still builds. Three of the 18
+# outside documents lost one this way.
+
+def test_declares_only_what_the_font_lacks():
+    lines, pkgs, lost = T.unicode_decls("Ω × ü α")
+    assert lines == [r"\newunicodechar{α}{\ensuremath{\alpha}}"]
+    assert "newunicodechar" in pkgs
+    assert lost == []
+
+
+def test_renderable_measured_not_assumed():
+    # Latin Modern has every Greek CAPITAL and no Greek lowercase. Measured;
+    # the asymmetry is why the set is a constant and not a rule.
+    assert T.renders_in_text("Ω")
+    assert not T.renders_in_text("ω")
+    for c in "×÷±∑√∞≈→€…":
+        assert T.renders_in_text(c), c
+
+
+def test_untranslatable_is_reported_not_dropped_silently():
+    _, _, lost = T.unicode_decls("a ≪ b")
+    assert lost == ["≪"]
+
+
+def test_private_use_is_not_a_character():
+    assert T.is_private_use("")
+    assert not T.is_private_use("α")
+    text, seen = T.strip_private_use("Windkanal")
+    assert text == "Windkanal"
+    assert seen == [""]
