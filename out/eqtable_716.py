@@ -161,6 +161,29 @@ def gold_equations(tex: Path) -> list:
     return [(env, body) for _, env, body in out if body]
 
 
+#: 755 -- AN EMPTY CELL MEANS TWO DIFFERENT THINGS.
+#:
+#: "no match" was printed both when a source never read an equation and when
+#: it read it and set it INLINE, in a `$...$` inside a paragraph. This table
+#: compares DISPLAY blocks, so the second case looked exactly like the first.
+#:
+#: wzlxjtu-082's fifth equation is four rows of residues. MathPix has the
+#: first of those four, as inline maths in the middle of a sentence; the cell
+#: said "no match" and read as a rendering failure. It is not one -- nothing
+#: on that page fails to typeset. It is a reading that was demoted.
+#:
+#: Distinguishing the two costs nothing and says something: a source that
+#: demoted a display to inline is a different defect from one that missed it.
+def inline_math(md: Path) -> list:
+    r"""The `$...$` spans of a markdown file, display blocks removed first."""
+    if not md.is_file():
+        return []
+    t = md.read_text(encoding="utf-8", errors="replace")
+    t = re.sub(r"^\$\$\s*$.*?^\$\$\s*$", "\n", t, flags=re.S | re.M)
+    out = [strip_noise(b) for b in re.findall(r"(?<!\$)\$([^$\n]{8,})\$(?!\$)", t)]
+    return [b for b in out if b]
+
+
 def md_blocks(md: Path) -> list:
     if not md.is_file():
         return []
@@ -577,6 +600,37 @@ def main():
                       len(m_left), len(p_left)))
         parts.append(rt.table_open(caption, widths, False, False, heads=heads))
         NOMATCH = r"{\itshape\footnotesize no match}"
+        m_inline = inline_math(d / (slug + ".md"))
+        p_inline = inline_math(d / "pdf2mmd" / "page.md")
+
+        def missing(gbody: str, spans: list) -> str:
+            """What to print where a source produced no display block.
+
+            755 -- if the mathematics is there INLINE, say so and show it.
+            Anything else is "no match", which then means one thing only.
+            """
+            from difflib import SequenceMatcher
+            a = key(gbody)
+            if a and spans:
+                best, at = 0.0, None
+                for s in spans:
+                    r = SequenceMatcher(None, a, key(s)).ratio()
+                    if r > best:
+                        best, at = r, s
+                if best >= 0.35:
+                    # `\par`, NOT `\\`. After a `\FitMath` box -- which is a
+                    # `\resizebox`, not a paragraph -- a `\\` ENDS THE ROW,
+                    # and the note landed in the next row's first column.
+                    # The "will not typeset" form above can use `\\` because
+                    # its content is plain text.
+                    return (cell(at)
+                            + r"\par{\itshape\footnotesize inline only, "
+                            # `%` STARTS A COMMENT. Written plain it ate the
+                            # closing brace and the row terminator with it:
+                            # 29 "Missing } inserted" and 21 demoted rows.
+                            + ("%.0f\\%% of the gold" % (100 * best)) + "}")
+            return NOMATCH
+
         for i, (genv, gbody) in enumerate(gold):
             mbody = cell_text(mpx, m_at[i])
             pbody = cell_text(p2m, p_at[i])
@@ -591,8 +645,8 @@ def main():
             # columns had drifted apart, and the two are not distinguishable
             # by eye -- which is what made the table hard to inspect.
             cells = [str(i + 1), cell(gbody, genv),
-                     cell(mbody) if mbody else NOMATCH,
-                     cell(pbody) if pbody else NOMATCH]
+                     cell(mbody) if mbody else missing(gbody, m_inline),
+                     cell(pbody) if pbody else missing(gbody, p_inline)]
             parts.append(" & ".join(cells) + " \\\\ \\hline\n")
             stats["matched_m"] += 1 if m_at[i] is not None else 0
             stats["matched_p"] += 1 if p_at[i] is not None else 0
