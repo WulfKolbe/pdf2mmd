@@ -420,3 +420,69 @@ class TestCommandsAreNotFusedWithLetters:
         """`\\S` ends a control SYMBOL at one character, but `\\Sx` would
         still be read as the control word `\\Sx`."""
         assert structure._ends_in_command(r"\S")
+
+
+class TestTwoOperatorsDoNotShareOneLimitGroup:
+    """760 -- the stream says which operator emitted a limit.
+
+    wzlxjtu-031's first display is `\\sum_{s=1}^{\\infty}\\sum_{|m|<s}`. The
+    first sum's `s=1` ends at x=169.0 and the second's `|m|<s` begins at
+    x=169.37 -- inside the contiguity that holds a condition together, so the
+    backward walk in x ran out of one group and straight into the other. The
+    second sum took both, and the `\\infty` with them, leaving one bare
+    operator: `\\sum \\sum\\limits_{s=1 \\mid m\\mid<s}^{\\infty}`.
+
+    The glyph list is in READING order and the content stream is not: TeX
+    sets a display operator as the vbox UPPER, OPERATOR, LOWER, so emission
+    order names the owner where x cannot.
+    """
+
+    def _scene(self, streams=True):
+        gl = []
+
+        def add(name, x, baseline, size, family, stream):
+            n = g(name, size, baseline, x, family)
+            n.id = "%s@%s" % (name, x)
+            n.stream = stream if streams else -1
+            gl.append(n)
+
+        # x order, which is NOT stream order -- that is the whole point.
+        add("summationdisplay", 153.32, 727.35, 10.0, "math-extension", 180)
+        add("infinity", 156.54, 736.00, 7.0, "math-symbol", 179)
+        add("s", 157.00, 719.00, 7.0, "math-italic", 181)
+        add("equal", 161.00, 719.00, 7.0, "math-symbol", 182)
+        add("one", 165.50, 719.00, 7.0, "math-italic", 183)
+        add("bar", 169.37, 719.00, 7.0, "math-symbol", 185)
+        add("m", 173.00, 719.00, 7.0, "math-italic", 186)
+        add("summationdisplay", 173.07, 727.35, 10.0, "math-extension", 184)
+        add("bar", 177.00, 719.00, 7.0, "math-symbol", 187)
+        add("less", 181.00, 719.00, 7.0, "math-symbol", 188)
+        add("s", 185.00, 719.00, 7.0, "math-italic", 189)
+        return gl
+
+    def _limits(self, glyphs):
+        """{operator x: ([upper names], [lower names])}."""
+        triples = structure._attach_scripts(glyphs)
+        assert triples is not None
+        return {round(main.rect[0], 2):
+                ([x.glyphname for x in sup], [x.glyphname for x in sub])
+                for main, sup, sub in triples
+                if main is not None and main.tex.kind == "bigop"}
+
+    def test_each_sum_keeps_its_own_lower_limit(self):
+        by_op = self._limits(self._scene())
+        assert sorted(by_op) == [153.32, 173.07]
+        assert by_op[153.32][1] == ["s", "equal", "one"]
+        assert by_op[173.07][1] == ["bar", "m", "bar", "less", "s"]
+
+    def test_the_upper_limit_stays_on_the_operator_that_emitted_it(self):
+        by_op = self._limits(self._scene())
+        assert by_op[153.32][0] == ["infinity"]
+        assert by_op[173.07][0] == []
+
+    def test_without_a_stream_the_x_rule_still_runs(self):
+        """The fallback is geometry, as before -- not a crash and not a
+        refusal. This is the reading the fix exists to correct, pinned so
+        that the two paths cannot be confused for one another."""
+        by_op = self._limits(self._scene(streams=False))
+        assert by_op[153.32] == ([], [])

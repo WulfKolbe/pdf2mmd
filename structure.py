@@ -373,6 +373,51 @@ def _attach_scripts(glyphs: list[GlyphNode]):
                  if i in bigops and texmap.may_take_limits(
                      glyphs[i].tex.latex, glyphs[i].glyphname)]
 
+    # 760 -- AND THE STREAM DOES DECIDE WHOSE, NOW THAT IT IS THE STREAM.
+    #
+    # The note above records stream ownership as tried and beaten (whole
+    # 50 -> 48). That experiment ran against an index built from
+    # `extract_pages`, which REORDERS at the BT/ET boundary -- 746 measured
+    # it and moved the index to `render_char`. The rule was judged on a
+    # stream that was not the stream.
+    #
+    # What x cannot do, on wzlxjtu-031's first display:
+    #
+    #     stream 179  infinity  x=156.54  base=730.34   upper of sum1
+    #     stream 180  SUM 1     x=153.32  base=727.35
+    #     stream 181  s   182 =   183 1                 lower of sum1
+    #     stream 184  SUM 2     x=173.07
+    #     stream 185..189  | m | < s                    lower of sum2
+    #
+    # sum1's `s=1` ends at x=168 and sum2's `|m|<s` begins at x=169.4 -- 1.4pt
+    # apart, well inside the 0.3 em contiguity that holds a condition
+    # together. So the backward walk from sum2 ran through sum2's own limit,
+    # through sum1's, and took the `\infty` too:
+    #
+    #     C = \sum \sum\limits_{s=1 \mid m\mid<s}^{\infty} C_m^s V_m^s
+    #
+    # one bare operator and one carrying everything. TeX's vbox order for a
+    # display operator is UPPER, OPERATOR, LOWER, so the stream says which
+    # operator emitted each limit and the baseline says which side it is on.
+    # This is ownership only -- the x window and the contiguity run still
+    # decide WHETHER a glyph is a limit at all.
+    _has_stream = all(getattr(g, "stream", -1) >= 0 for g in glyphs)
+    _op_by_stream = sorted(((glyphs[i].stream, i) for i in limit_ops)) \
+        if _has_stream else []
+
+    def _stream_owner(j: int):
+        """The limit operator that emitted glyph j, or None if unknown."""
+        if not _op_by_stream:
+            return None
+        s = glyphs[j].stream
+        before = [i for st, i in _op_by_stream if st < s]
+        after = [i for st, i in _op_by_stream if st > s]
+        if before and glyphs[j].baseline < glyphs[before[-1]].baseline:
+            return before[-1]            # below the operator: a lower limit
+        if after and glyphs[j].baseline > glyphs[after[0]].baseline:
+            return after[0]              # above it: an upper limit
+        return before[-1] if before else (after[0] if after else None)
+
     claimed: dict[int, list] = {}
     for i in limit_ops:
         ox0, ox1 = glyphs[i].rect[0], glyphs[i].rect[2]
@@ -410,6 +455,9 @@ def _attach_scripts(glyphs: list[GlyphNode]):
             # Widening the window instead was measured at 1.0 and 2.0 em and
             # cost a whole equation each time; adjacency to what is already
             # claimed costs nothing, because it cannot wander.
+            owner = _stream_owner(j)
+            if owner is not None and owner != i:
+                break                    # emitted by a different operator
             run = claimed.get(i)
             if run:
                 nearest = glyphs[run[0]].rect[0]
