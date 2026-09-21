@@ -481,7 +481,7 @@ def mark_unrenderable(tex: Path) -> int:
     def sub(m):
         if m.group(1) not in bad:
             return m.group(0)
-        return ("{\\ttfamily\\tiny %s}\\\\[.2em]{\\footnotesize\\itshape "
+        return ("{\\ttfamily\\tiny %s}\\par{\\footnotesize\\itshape "
                 "(will not typeset)}" % rt.esc_source(m.group(1)))
 
     tex.write_text(_FITMATH.sub(sub, doc), encoding="utf-8")
@@ -501,7 +501,13 @@ def cell(body: str, env: str = "") -> str:
         if safe.lstrip().startswith("["):
             safe = "\\relax " + safe
         return "\\FitMath{$\\displaystyle %s$}" % safe
-    return ("{\\ttfamily\\tiny %s}\\\\[.2em]{\\footnotesize\\itshape "
+    # 757 -- `\\par`, NOT `\\\\`. Inside a longtable cell `\\\\` ENDS THE ROW.
+    # This form was written with `\\\\[.2em]` and looked safe for two months
+    # because it only ever landed in the LAST column, where ending the row
+    # early is invisible. Showing the unmatched blocks put it in the THIRD
+    # column of wzlxjtu-041, and the row split: `(will not typeset)` came out
+    # under the No column and every cell after it shifted one to the left.
+    return ("{\\ttfamily\\tiny %s}\\par{\\footnotesize\\itshape "
             "(will not typeset)}" % rt.esc_source(body))
 
 

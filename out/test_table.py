@@ -127,3 +127,17 @@ def test_the_probe_convicts_the_guilty_and_clears_the_innocent():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_an_unrenderable_cell_does_not_end_the_row():
+    r"""757 — inside a longtable cell `\\` ENDS THE ROW. The unrenderable
+    form used it, and looked safe only because it had never appeared in
+    anything but the last column. In wzlxjtu-041's unmatched table it landed
+    in the third, and `(will not typeset)` came out under the No column with
+    every following cell shifted one to the left."""
+    # `\bogusmacro{x}` passes the STATIC gate -- only the compile probe
+    # catches it. An unbalanced brace is what `display_safe` refuses.
+    for bad in (r"\frac{a}{", r"\left( a + b", r"x \text{50% done}"):
+        c = eq.cell(bad)
+        assert "will not typeset" in c, bad
+        assert "\\\\" not in c, c
