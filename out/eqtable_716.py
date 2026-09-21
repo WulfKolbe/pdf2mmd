@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+r"""716 — the display-equation comparison as a LaTeX table, built with the
+report machinery that already works.
+
+714 built this as an HTML page with KaTeX. That was me inventing a second
+pipeline beside the one this project already has. `reports/tex.py` is the
+precedent and every piece of it applies here:
+
+    rt.preamble(...)                    the package set, Unicode fallbacks
+    rt.table_open(caption, widths,      a longtable, with CUSTOM heads --
+                  heads=...)            the one existing caller that passes
+                                        `heads` is reports/tex.py:103
+    " & ".join(cells) + r" \\ \hline"   the row
+    rt.display_safe(latex)              WILL this typeset? (to_inline_env
+                                        mapped, then renderable)
+    \FitMath{$\displaystyle ...$}       shrink an over-wide expression into
+                                        its column instead of overflowing
+    rt.compile_fixpoint(tex)            compile to the fixpoint
+
+FOUR COLUMNS, as asked: No | gold | MathPix | pdf2mmd. The document is the
+table's caption, which is what a caption is for here -- `table_open`'s own
+comment says the caption names the POPULATION a table holds.
+
+THE CELL GATE MATTERS MORE THAN IT LOOKS. The gold column carries real author
+LaTeX (`eqnarray`, `\resizebox`, `\mathds`, `{1 \over ...}`) and pdf2mmd
+carries expressions that are not valid LaTeX at all (`\midD`, `\ellmn`, a
+lone `\left[`). Without `display_safe` those abort the compile rather than
+showing as one marked cell. A cell that will not typeset says so, in place --
+never a blank, which would be indistinguishable from "this source read
+nothing here".
+
+ROWS ARE NOT ALIGNED ACROSS COLUMNS. MathPix agrees with gold on the
+equation count in 96 of 102 documents; pdf2mmd in 7. pdf2mmd splits one
+display equation into several blocks, so its Nth block is not the Nth of the
+others. Each column is listed in its own order and the per-document counts
+are printed in the caption, so a mismatch is visible rather than implied
+away.
+
+LICENCE: golden/ is TEES, Texas A&M -- "not to be reproduced or disclosed
+without written authorization". This writes a LOCAL pdf and nothing else.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+#: WHERE THE DATA IS. Code lives in this repo; the corpus does not.
+#: Override either with an environment variable.
+LIB = Path(os.environ.get("PDF2MMD_LIBRARY",
+                          Path.home() / "pdfdrill-library"))
+#: `report_tex` supplies the preamble and the demote-to-fixpoint compile.
+#: It belongs to PDFDRILL, a separate repository.
+sys.path.insert(0, os.environ.get("PDFDRILL_SRC",
+                                  str(Path.home() / "MX/PDFDRILL/src")))
+from pdfdrill import report_tex as rt          # noqa: E402
+
+ENVS = ("equation*", "equation", "eqnarray*", "eqnarray", "align*", "align",
+        "gather*", "gather", "multline*", "multline", "displaymath")
+
+#: display_safe()/renderable() judge an expression for a `$...$` cell, so a
+#: display environment must first be mapped to its in-math counterpart --
+#: exactly what to_inline_env does for the report's own Rendered column.
+_ENV_MAP = {"eqnarray": "aligned", "eqnarray*": "aligned",
+            "align": "aligned", "align*": "aligned",
+            "gather": "gathered", "gather*": "gathered",
+            "multline": "gathered", "multline*": "gathered"}
+
+
+_RESIZE = re.compile(r"\\resizebox\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\{\s*\$(.*)\$\s*\}\s*$",
+                     re.S)
+
+
+def unbox(s: str) -> str:
+    r"""Drop a `\resizebox` that wraps the whole formula, keeping the maths.
+
+    THE AUTHOR'S SCALING IS NOT OURS. wzlxjtu-002 sets its second display as
+    `\resizebox{0.88\linewidth}{!}{$\displaystyle ...$}` -- a BOX, not
+    mathematics, so `$\displaystyle \resizebox{...}{$...$}$` nests `$` inside
+    `$` and cannot compile: the one gold cell in the whole table that would
+    not typeset.
+
+    And `0.88\linewidth` is meaningless here anyway. It means 88% of the
+    AUTHOR's column; this table sets the same formula in a third of an A3
+    landscape page. Every length in a projected formula is relative to a page
+    that is not the page it is being set on, which is the general form of the
+    problem. `\FitMath` already shrinks an over-wide expression into its
+    column, measured against THIS column, so the author's box is not only
+    unusable but unnecessary.
+    """
+    m = _RESIZE.match(s.strip())
+    return m.group(1).strip() if m else s
+
+
+def strip_noise(s: str) -> str:
+    s = re.sub(r"\\label\{[^}]*\}", "", s)
+    # 739 -- `\tag{3}` is the equation NUMBER, which this reader now states
+    # in the markdown because markdown numbers nothing itself. It is not part
+    # of the mathematics and must not decide a match.
+    s = re.sub(r"\\tag\*?\{[^}]*\}", "", s)
+    s = re.sub(r"\\nonumber|\\notag", "", s)
+    s = re.sub(r"%.*?$", "", s, flags=re.M)
+    return unbox(s.strip())
+
+
+def gold_equations(tex: Path) -> list:
+    """Display maths from the author's LaTeX, in document order.
+
+    The gold sources use `\\begin{equation}` and friends, never `$$`: measured
+    across all 102 -- eqnarray 122, equation 85, equation* 62, gather* 55,
+    align 40, align* 36, array 28, gather 9, \\[..\\] 6, multline 4, split 1,
+    and `$$` ZERO times.
+    """
+    t = tex.read_text(encoding="utf-8", errors="replace")
+    out, seen = [], []
+    for env in ENVS:
+        for m in re.finditer(r"\\begin\{" + re.escape(env) + r"\}(.*?)\\end\{"
+                             + re.escape(env) + r"\}", t, re.S):
+            out.append((m.start(), env, strip_noise(m.group(1))))
+            seen.append((m.start(), m.end()))
+
+    def covered(pos):
+        return any(a <= pos < b for a, b in seen)
+
+    for m in re.finditer(r"\\\[(.*?)\\\]", t, re.S):
+        if not covered(m.start()):
+            out.append((m.start(), r"\[..\]", strip_noise(m.group(1))))
+            seen.append((m.start(), m.end()))
+
+    # 736 -- A CENTRED MATHS BLOCK IS A DISPLAY EQUATION.
+    #
+    # wzlxjtu-003 reported zero gold equations while its page carries three,
+    # and both readers found all three. The gold transcription sets them
+    # without any display environment at all:
+    #
+    #   \begin{center}$\displaystyle \mathcal{M}=\frac{SO(4,n)}{...}$  (3)
+    #   \end{center}
+    #
+    # That IS a display equation -- centred, on its own, with its number --
+    # and this table was calling it nothing. Six documents return no gold; the
+    # other five are prose pages where both readers also produce nothing, so
+    # they are right. This one was a gap in the MEASUREMENT.
+    #
+    # Only a `center` whose content is mathematics counts. A centred FIGURE,
+    # caption or heading is not an equation, so the block must carry `$...$`
+    # and the text outside it must be an equation number or nothing.
+    for m in re.finditer(r"\\begin\{center\}(.*?)\\end\{center\}", t, re.S):
+        if covered(m.start()):
+            continue
+        inner = m.group(1)
+        maths = re.findall(r"(?<!\\)\$(.+?)(?<!\\)\$", inner, re.S)
+        if not maths:
+            continue
+        rest = re.sub(r"(?<!\\)\$.+?(?<!\\)\$", "", inner, flags=re.S)
+        rest = re.sub(r"\(\d+(?:\.\d+)*\)|\\label\{[^}]*\}|\s+", "", rest)
+        if rest:
+            continue              # centred prose or a figure, not an equation
+        out.append((m.start(), "center", strip_noise(" ".join(maths))))
+    out.sort()
+    return [(env, body) for _, env, body in out if body]
+
+
+def md_blocks(md: Path) -> list:
+    if not md.is_file():
+        return []
+    t = md.read_text(encoding="utf-8", errors="replace")
+    return [strip_noise(b) for b in
+            re.findall(r"^\$\$\s*$(.*?)^\$\$\s*$", t, re.S | re.M)
+            if strip_noise(b)]
+
+
+def as_inline(env: str, body: str) -> str:
+    mapped = _ENV_MAP.get(env)
+    if mapped:
+        return "\\begin{%s}%s\\end{%s}" % (mapped, body, mapped)
+    return body
+
+
+#: 744 — ROWS ARE MATCHED BY CONTENT, NOT BY POSITION.
+#:
+#: This file used to take the Nth block of each source for row N, and said so:
+#: pdf2mmd emitted 817 blocks against the author's 421, so no pairing was
+#: possible and listing each column in its own order was the honest choice.
+#:
+#: It is now 361 against 421, and that changes what the table is FOR -- it can
+#: be read across a row. Positional pairing then becomes actively misleading:
+#: one equation deferred early shifts every row below it by one, so the first
+#: row is right and everything after it shows the NEXT equation's reading
+#: beside this equation's gold. Which is exactly what it looked like.
+#:
+#: Each gold equation now draws its best match from each source, one block used
+#: at most once, assigned globally best-first so a single miss cannot cascade.
+#: Anything a source emitted that matched no gold equation is listed after the
+#: document's rows rather than dropped, because a block with nowhere to go is a
+#: finding, not noise.
+_SYN = {r'\varepsilon': r'\epsilon', r'\varphi': r'\phi', r'\leqslant': r'\le',
+        r'\geqslant': r'\ge', r'\leq': r'\le', r'\geq': r'\ge',
+        r'\rightarrow': r'\to', r'\widehat': r'\hat', r'\overline': r'\bar',
+        r'\prime': "'", r'\cdots': r'\ldots', r'\dots': r'\ldots',
+        # 749 -- `\mid` and `|` are the SAME character; `\mid` only adds
+        # relation spacing. Gold writes `|` for "given that" and this reader
+        # writes `\mid`, so every conditional expectation differed on every
+        # bar. Per row that cost 1.000 -> 0.787, and over a three-row block
+        # enough to put the WHOLE BLOCK (0.445) below a SINGLE ROW (0.470):
+        # wzlxjtu-065 showed only the third row of each of its two
+        # equations, in the MathPix column and in ours, while both .md files
+        # held all three. The same synonym was added to `canon.py` in 739;
+        # this matcher never got it.
+        r'\mid': '|', r'\vert': '|', r'\Vert': r'\|',
+        r'\parallel': r'\|'}
+_FONT = re.compile(r'\\(mathcal|mathrm|mathbb|mathbf|mathit|mathds|boldsymbol'
+                   r'|bm|text|cal|bf|rm|it)\s*')
+_SIZE = re.compile(r'\\(left|right|bigg?|Bigg?)(l|r|m)?(?![A-Za-z])')
+_SPACE = re.compile(r'\\[,;:!>]|\\quad|\\qquad|\\hspace\{[^}]*\}|~')
+_NOISE = re.compile(r'\\label\{[^}]*\}|\\notag|\\nonumber|\\displaystyle|\\!')
+_ENVW = re.compile(r'\\(begin|end)\{(aligned|gathered|array|split)\}(\{[^}]*\})?')
+_OVER = re.compile(r'\{\s*([^{}]*?)\s*\\over\s*([^{}]*?)\s*\}')
+
+
+def key(x: str) -> str:
+    """A spelling-independent form, for MATCHING only -- never for display."""
+    x = _NOISE.sub("", x)
+    x = _ENVW.sub("", x)
+    x = _SIZE.sub("", x)
+    x = _SPACE.sub("", x)
+    x = _FONT.sub("", x)
+    for _ in range(4):
+        x = _OVER.sub(r"\\frac{\1}{\2}", x)
+    for a, b in _SYN.items():
+        x = x.replace(a, b)
+    return re.sub(r"[{}\s&]|\\\\", "", x)
+
+
+_ALIGNED = re.compile(r"\\begin\{aligned\}(.*)\\end\{aligned\}", re.S)
+
+
+def units(blocks: list) -> list:
+    r"""Every unit a gold equation could match: whole blocks, and their ROWS.
+
+    745 — ONE BLOCK CAN HOLD SEVERAL GOLD EQUATIONS. A fused run is emitted as
+    `\begin{aligned} ... \\ ... \end{aligned}`, and its rows may be different
+    authored equations. Matching whole blocks one-to-one therefore reported
+    "no match" for an equation whose text was sitting inside a block another
+    equation had already claimed -- wzlxjtu-014's tenth display against a
+    block holding its ninth, at 37%, with its own row right there.
+
+    Returns (block index, row index or None, text). The whole block is offered
+    as well as its rows, because a multi-row gold equation matches the block.
+    """
+    out = []
+    for j, b in enumerate(blocks):
+        out.append((j, None, b))
+        m = _ALIGNED.search(b)
+        rows = (m.group(1) if m else b).split(r"\\")
+        if len(rows) > 1:
+            for k, r in enumerate(rows):
+                if r.strip():
+                    out.append((j, k, r.strip()))
+    return out
+
+
+def align(gold: list, blocks: list) -> tuple:
+    """(match per gold equation or None, indices of wholly unmatched blocks).
+
+    A match is (block index, row index or None); `cell_text` renders it.
+    """
+    from difflib import SequenceMatcher
+    gk = [key(b) for _, b in gold]
+    cands = units(blocks)
+    ck = [key(txt) for _, _, txt in cands]
+    scored = []
+    for i, a in enumerate(gk):
+        if not a:
+            continue
+        for c, b in enumerate(ck):
+            if not b:
+                continue
+            r = SequenceMatcher(None, a, b).ratio()
+            if r >= 0.35:
+                scored.append((r, i, c))
+    scored.sort(key=lambda s: (-s[0], s[1], s[2]))
+    out = [None] * len(gold)
+    taken = set()                      # (block, row) already spoken for
+    def claims(c):
+        j, k, _ = cands[c]
+        if k is None:
+            return {(j, kk) for jj, kk, _ in cands if jj == j}
+        return {(j, k), (j, None)}
+    for _, i, c in scored:
+        if out[i] is not None:
+            continue
+        if claims(c) & taken:
+            continue
+        out[i] = (cands[c][0], cands[c][1])
+        taken |= claims(c)
+    touched = {j for j, _ in taken}
+    return out, [j for j in range(len(blocks)) if j not in touched]
+
+
+def cell_text(blocks: list, hit) -> str:
+    r"""The text of a match, which may be one ROW of a block.
+
+    A row lifted out of an `aligned` can be unbalanced on its own -- the
+    `\left` that opens it may be closed on the next row -- and then the cell
+    will not typeset at all. Where that happens the WHOLE block is shown
+    instead: a row that cannot be rendered says less than the block it came
+    from, and the point of the cell is to be read.
+    """
+    if hit is None:
+        return ""
+    j, k = hit
+    if k is None:
+        return blocks[j]
+    m = _ALIGNED.search(blocks[j])
+    rows = (m.group(1) if m else blocks[j]).split(r"\\")
+    if k >= len(rows):
+        return blocks[j]
+    row = rows[k].strip()
+    return row if rt.display_safe(row) else blocks[j]
+
+
+#: 738 -- A LEADING `&` IS FATAL UNDER MATHTOOLS.
+#:
+#: `\begin{aligned}&\log x\end{aligned}` compiles under amsmath alone and
+#: FAILS with mathtools also loaded, which this table loads:
+#:
+#:     ! Missing control sequence inserted.  <inserted text> \inaccessible
+#:     Please don't say `\def cs{...}', say `\def\cs{...}'.
+#:
+#: Bisected: the trigger is an `&` as the FIRST TOKEN of the environment
+#: body, and the damage then surfaces at the next `\nolimits` operator --
+#: `\log`, `\sin`; `\min` is unaffected because it takes limits. An author
+#: who writes `align` with the tab before the first term produces exactly
+#: that shape, and gold does it often.
+#:
+#: One fatal row aborted the WHOLE table -- "No pages of output" -- and the
+#: demote fixpoint then had to tear rows out until it compiled. That is
+#: where most of the eleven "(not rendered)" came from; only three were the
+#: cell's own fault.
+#:
+#: `{}` before the tab is enough: the first cell of an `aligned` row is
+#: empty either way, so nothing moves.
+_LEAD_AMP = re.compile(
+    r"(\\begin\{(?:aligned|split|gathered|alignedat)\}(?:\[[^\]]*\])?"
+    r"(?:\{[^}]*\})?)\s*&")
+
+
+def guard_leading_amp(s: str) -> str:
+    return _LEAD_AMP.sub(r"\1{}&", s)
+
+
+#: 738 -- EVERY CELL JUDGED ON ITS OWN.
+#:
+#: `compile_fixpoint` demotes a ROW whose LINE errors, because that is all
+#: xelatex reports: `l.838`, never "the second cell". Three columns share a
+#: line, so a broken MathPix reading took the gold reading down with it --
+#: and the gold column is the one that must never say "(not rendered)",
+#: because it is the thing everything else is being compared against.
+#:
+#: So each cell is set ON ITS OWN LINE in a probe document and compiled once.
+#: Now a line number IS a cell. A cell that fails is shown as its source,
+#: marked, and its neighbours are left alone.
+#:
+#: Iterated, because TeX cascades: a runaway in one box can throw errors on
+#: the lines after it. Each pass drops the cells already known bad and runs
+#: again, so a cascade victim gets a clean second look. Converges in two or
+#: three passes over this corpus.
+_PROBE_MAX_PASSES = 60
+
+
+def unrenderable_cells(bodies: list, preamble: str, work: Path) -> set:
+    r"""Which of these `$\displaystyle` bodies will not typeset, each alone.
+
+    ONE CULPRIT PER PASS. TeX cascades: a box that runs away throws errors on
+    the lines after it too, so a pass that believed every `l.<n>` it saw
+    marked innocent cells and never took the mark back. Only the FIRST
+    erroring line of a pass is a verdict; everything after it may be the
+    wreckage. That cell is dropped and the probe runs again, so each pass
+    convicts exactly one and the rest get a clean look.
+    """
+    import subprocess
+    todo = list(dict.fromkeys(b for b in bodies if b))
+    bad: set = set()
+    for _ in range(_PROBE_MAX_PASSES):
+        live = [b for b in todo if b not in bad]
+        if not live:
+            break
+        lines = [preamble]
+        # the preamble is ONE list item and MANY lines; count its newlines
+        first = preamble.count("\n") + 2
+        lines += ["\\begingroup\\setbox0=\\hbox{$\\displaystyle " + b
+                  + r"$}\endgroup" for b in live]
+        lines += [r"\mbox{}", r"\end{document}", ""]
+        probe = work / "cellprobe.tex"
+        probe.write_text("\n".join(lines), encoding="utf-8")
+        subprocess.run(["xelatex", "-interaction=nonstopmode", "-no-shell-escape",
+                        "-output-directory", str(work), str(probe)],
+                       capture_output=True, text=True, timeout=1800)
+        log = work / "cellprobe.log"
+        txt = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+        hit = sorted({int(n) for n in re.findall(r"(?m)^l\.(\d+)", txt)})
+        idx = [n - first for n in hit if 0 <= n - first < len(live)]
+        if not idx:
+            break
+        bad.add(live[min(idx)])
+    return bad
+
+
+_FITMATH = re.compile(r"\\FitMath\{\$\\displaystyle ((?:[^$\\]|\\.)*)\$\}")
+
+
+def mark_unrenderable(tex: Path) -> int:
+    r"""Replace every cell that will not typeset with its source, marked.
+
+    Runs on the FINISHED document, so what is judged is exactly what will be
+    compiled. Returns how many cells were marked.
+    """
+    doc = tex.read_text(encoding="utf-8")
+    head, sep, _ = doc.partition("\\begin{document}")
+    if not sep:
+        return 0
+    bodies = _FITMATH.findall(doc)
+    bad = unrenderable_cells(bodies, head + sep, tex.parent)
+    if not bad:
+        return 0
+
+    def sub(m):
+        if m.group(1) not in bad:
+            return m.group(0)
+        return ("{\\ttfamily\\tiny %s}\\\\[.2em]{\\footnotesize\\itshape "
+                "(will not typeset)}" % rt.esc_source(m.group(1)))
+
+    tex.write_text(_FITMATH.sub(sub, doc), encoding="utf-8")
+    return len(bad)
+
+
+def cell(body: str, env: str = "") -> str:
+    r"""A typeset cell, or the source marked as unrenderable -- never blank."""
+    if not body:
+        return "---"
+    safe = guard_leading_amp(rt.display_safe(as_inline(env, body)))
+    if safe:
+        # amsmath reads a `[` at formula start as a positional argument --
+        # "Bracket group [T_\Lambda, T_\Sigma] at formula start ... add a
+        # \relax in front to hide it". Real author LaTeX opens with one
+        # (a commutator), so hide it rather than let amsmath guess.
+        if safe.lstrip().startswith("["):
+            safe = "\\relax " + safe
+        return "\\FitMath{$\\displaystyle %s$}" % safe
+    return ("{\\ttfamily\\tiny %s}\\\\[.2em]{\\footnotesize\\itshape "
+            "(will not typeset)}" % rt.esc_source(body))
+
+
+def provenance() -> str:
+    """Which reader produced the pdf2mmd column, and when this was built.
+
+    743 -- "was the table rendered after the last change?" could only be
+    answered by comparing file mtimes outside the document, and three
+    different builds had been sent under the same name. The PDF now says it
+    itself.
+
+    753 -- FROM GIT, now that the code is a repository. An mtime says when a
+    file was last WRITTEN, which after a clone or a copy is the moment of
+    copying and nothing about the code: moving this repo made every source
+    file read `20260921-1107` and the stamp became a lie. A commit hash
+    cannot drift that way. The mtime scheme is kept for a tree that is not a
+    checkout, and a dirty tree says so.
+    """
+    import datetime
+    import subprocess
+    src = Path(os.environ.get("PDF2MMD_CODE",
+                              Path(__file__).resolve().parent.parent))
+    built = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(src), *a],
+                              capture_output=True, text=True,
+                              timeout=30).stdout.strip()
+
+    try:
+        head = git("rev-parse", "--short", "HEAD")
+        if head:
+            when = git("log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M")
+            dirty = " +local changes" if git("status", "--porcelain") else ""
+            return ("pdf2mmd %s of %s%s — table built %s"
+                    % (head, when, dirty, built))
+    except Exception:
+        pass
+
+    newest, name = 0.0, "?"
+    for f in sorted(src.glob("*.py")):
+        if f.stat().st_mtime > newest:
+            newest, name = f.stat().st_mtime, f.name
+    rev = datetime.datetime.fromtimestamp(newest).strftime("%Y%m%d-%H%M")
+    return ("pdf2mmd revision %s (newest source: %s, not a checkout) "
+            "— table built %s" % (rev, name, built))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(LIB / "out" / "716-equations.tex"))
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--paper", default="a3")
+    ap.add_argument("--no-compile", action="store_true")
+    ap.add_argument("--unmatched", action="store_true",
+                    help="also list blocks that match no gold equation")
+    A = ap.parse_args()
+
+    w_mm, h_mm = rt.PAPER_MM[A.paper]
+    w_mm, h_mm = h_mm, w_mm                      # landscape
+    usable = w_mm - 36
+    span = usable - 18                           # 4 columns of \tabcolsep + rules
+    no_w = 10
+    eq_w = round((span - no_w) / 3)
+    widths = (no_w, eq_w, eq_w, span - no_w - 2 * eq_w)
+    heads = ("No", "gold (author)", "MathPix", "pdf2mmd")
+
+    docs = sorted(d for d in LIB.glob("wzlxjtu-*") if d.is_dir())
+    if A.limit:
+        docs = docs[:A.limit]
+
+    parts, stats = [], {"docs": 0, "gold": 0, "mathpix": 0, "pdf2mmd": 0,
+                        "matched_m": 0, "matched_p": 0, "left_m": 0, "left_p": 0,
+                        "unrenderable": {"gold": 0, "mathpix": 0, "pdf2mmd": 0}}
+    for d in docs:
+        slug = d.name
+        gt = next(iter(d.glob("golden/*_gt.tex")), None)
+        if gt is None:
+            continue
+        gold = gold_equations(gt)
+        mpx = md_blocks(d / (slug + ".md"))
+        p2m = md_blocks(d / "pdf2mmd" / "page.md")
+        if not (gold or mpx or p2m):
+            continue
+        stats["docs"] += 1
+        stats["gold"] += len(gold)
+        stats["mathpix"] += len(mpx)
+        stats["pdf2mmd"] += len(p2m)
+        m_at, m_left = align(gold, mpx)
+        p_at, p_left = align(gold, p2m)
+        caption = ("%s — gold %d; matched MathPix %d, pdf2mmd %d; "
+                   "unmatched blocks MathPix %d, pdf2mmd %d"
+                   % (rt.esc_text(slug), len(gold),
+                      sum(1 for x in m_at if x is not None),
+                      sum(1 for x in p_at if x is not None),
+                      len(m_left), len(p_left)))
+        parts.append(rt.table_open(caption, widths, False, False, heads=heads))
+        NOMATCH = r"{\itshape\footnotesize no match}"
+        for i, (genv, gbody) in enumerate(gold):
+            mbody = cell_text(mpx, m_at[i])
+            pbody = cell_text(p2m, p_at[i])
+            # `key` was the loop variable here and is now the matching
+            # function above; shadowing it made every row raise.
+            for col, b, e in (("gold", gbody, genv), ("mathpix", mbody, ""),
+                              ("pdf2mmd", pbody, "")):
+                if b and not rt.display_safe(as_inline(e, b)):
+                    stats["unrenderable"][col] += 1
+            # An empty cell now means ONE thing: that source emitted nothing
+            # matching THIS equation. Before it meant that, or that the
+            # columns had drifted apart, and the two are not distinguishable
+            # by eye -- which is what made the table hard to inspect.
+            cells = [str(i + 1), cell(gbody, genv),
+                     cell(mbody) if mbody else NOMATCH,
+                     cell(pbody) if pbody else NOMATCH]
+            parts.append(" & ".join(cells) + " \\\\ \\hline\n")
+            stats["matched_m"] += 1 if m_at[i] is not None else 0
+            stats["matched_p"] += 1 if p_at[i] is not None else 0
+        # A block matching NO gold equation gets no row by default.
+        #
+        # These were listed after the document's rows, on the reasoning that a
+        # block with nowhere to go is a finding rather than noise. In a table
+        # whose every row exists to be read ACROSS -- gold beside the two
+        # readings of it -- that is wrong: 106 of 527 rows had nothing in the
+        # gold column, so there was nothing to compare them against, and they
+        # broke up the run of real comparisons.
+        #
+        # They are still COUNTED, per document in the caption and once at the
+        # end, so nothing is hidden; `--unmatched` puts the rows back for when
+        # the question is "what did it emit that is not an equation at all".
+        UNM = r"{\itshape\footnotesize (unmatched)}"
+        if A.unmatched:
+            for j in m_left:
+                parts.append(" & ".join(["--", UNM, cell(mpx[j]), "--"])
+                             + " \\\\ \\hline\n")
+            for j in p_left:
+                parts.append(" & ".join(["--", UNM, "--", cell(p2m[j])])
+                             + " \\\\ \\hline\n")
+        stats["left_m"] += len(m_left)
+        stats["left_p"] += len(p_left)
+        parts.append("\\end{longtable}\n")
+
+    body = "".join(parts)
+    title = ("Display equations — gold vs MathPix vs pdf2mmd "
+             "(%d documents; gold %d, MathPix %d, pdf2mmd %d)"
+             % (stats["docs"], stats["gold"], stats["mathpix"], stats["pdf2mmd"]))
+    geom = "%spaper,landscape" % A.paper
+    doc = (rt.preamble(bbdigits=rt.MATHBB_DIGITS, form="", geom=geom,
+                       pagesel=rt.pagesel_line(None),
+                       unicode=rt.unicode_decls(body))
+           + "\\begin{center}{\\Large\\bfseries %s}\\end{center}\n" % rt.esc_text(title)
+           + "\\begin{center}{\\footnotesize %s}\\end{center}\n"
+             % rt.esc_text(provenance())
+           + body + "\n\\end{document}\n")
+
+    out = Path(A.out)
+    out.write_text(doc, encoding="utf-8")
+    print("documents %d   gold %d   mathpix %d   pdf2mmd %d"
+          % (stats["docs"], stats["gold"], stats["mathpix"], stats["pdf2mmd"]))
+    print("matched to a gold equation: MathPix %d, pdf2mmd %d of %d"
+          % (stats["matched_m"], stats["matched_p"], stats["gold"]))
+    print("blocks matching no gold equation: MathPix %d, pdf2mmd %d"
+          % (stats["left_m"], stats["left_p"]))
+    print("cells that will not typeset: %s" % stats["unrenderable"])
+    print("wrote %s (%d bytes)" % (out, out.stat().st_size))
+    if not A.no_compile:
+        n = mark_unrenderable(out)
+        print("cells marked unrenderable by the per-cell probe: %d" % n)
+        c = rt.compile_fixpoint(out)
+        print("compile: %r" % (c,))
+
+
+if __name__ == "__main__":
+    main()
