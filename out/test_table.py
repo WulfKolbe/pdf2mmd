@@ -166,3 +166,67 @@ def test_no_other_environment_loses_a_leading_braced_group(tmp_path):
                   "\n\\end{document}\n", encoding="utf-8")
     gold = eq.gold_equations(gt)
     assert gold[0][1] == r"{\cal C}^2 = 1", gold[0][1]
+
+
+# --- 764: one entry per equation NUMBER ------------------------------------
+
+def _gold(tmp_path, body):
+    gt = tmp_path / "1_gt.tex"
+    gt.write_text("\\begin{document}\n" + body + "\n\\end{document}\n",
+                  encoding="utf-8")
+    return eq.gold_equations(gt)
+
+
+def test_an_align_of_two_rows_is_two_equations(tmp_path):
+    r"""764 — wzlxjtu-031's third gold equation sets two rows of `align`,
+    and the page shows two numbered displays, (3) and (4). This reader read
+    both exactly; one matched and the other was listed as matching no gold
+    equation at all."""
+    gold = _gold(tmp_path, r"\begin{align} A&=x\\ \bar{A}&=y \end{align}")
+    assert [b for _, b in gold] == [r"A&=x", r"\bar{A}&=y"]
+
+
+def test_a_starred_align_numbers_nothing_and_stays_one(tmp_path):
+    gold = _gold(tmp_path, r"\begin{align*} A&=x\\ \bar{A}&=y \end{align*}")
+    assert len(gold) == 1
+
+
+def test_a_nonumber_row_joins_the_numbered_row_below_it(tmp_path):
+    r"""How an author breaks ONE long equation over two lines."""
+    gold = _gold(tmp_path,
+                 r"\begin{align} A&=x+\nonumber\\ &\quad y \end{align}")
+    assert len(gold) == 1
+    assert "y" in gold[0][1] and "A" in gold[0][1]
+
+
+def test_a_row_break_inside_a_nested_environment_is_not_a_row(tmp_path):
+    r"""`\\` inside `cases` is a row of the CASES, not of the display."""
+    gold = _gold(tmp_path,
+                 r"\begin{align} f&=\begin{cases}1\\2\end{cases} \end{align}")
+    assert len(gold) == 1
+
+
+def test_a_row_break_inside_braces_is_not_a_row(tmp_path):
+    gold = _gold(tmp_path,
+                 r"\begin{align} f&=\substack{a\\b} \end{align}")
+    assert len(gold) == 1
+
+
+def test_a_skip_after_the_break_is_not_mathematics(tmp_path):
+    r"""`\\[2mm]` — the bracketed length is spacing, not a row."""
+    gold = _gold(tmp_path, r"\begin{align} A&=x\\[2mm] B&=y \end{align}")
+    assert [b for _, b in gold] == [r"A&=x", r"B&=y"]
+
+
+def test_equation_is_never_split(tmp_path):
+    r"""`equation` numbers ONCE however many `\\` a `split` inside it has."""
+    gold = _gold(tmp_path,
+                 r"\begin{equation}\begin{split}A&=x\\&=y\end{split}\end{equation}")
+    assert len(gold) == 1
+
+
+def test_the_rows_of_one_environment_keep_their_order(tmp_path):
+    gold = _gold(tmp_path,
+                 r"\begin{equation}Z\end{equation}"
+                 r"\begin{align} A&=x\\ B&=y\\ C&=z \end{align}")
+    assert [b for _, b in gold] == ["Z", r"A&=x", r"B&=y", r"C&=z"]

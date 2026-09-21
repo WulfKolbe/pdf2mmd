@@ -118,6 +118,82 @@ def strip_noise(s: str) -> str:
     return unbox(s.strip())
 
 
+#: 764 -- `align` NUMBERS EVERY ROW, so every row is an equation.
+#:
+#: wzlxjtu-031's third gold equation is
+#:
+#:     \begin{align} A&=e^{\rho}V_1^2dz+V_0^2d\rho\\
+#:                   \bar{A}&=e^{\rho}V_{-1}^2d\bar{z}-V_0^2d\rho \end{align}
+#:
+#: and the page it produces shows TWO numbered displays, (3) and (4). This
+#: reader reads both, exactly, and emitted them as two blocks -- so one of
+#: them matched the single gold row and the other was listed as matching no
+#: gold equation at all. The reading was right and the measurement said it
+#: was half right.
+#:
+#: This is the SAME rule the reader already uses (739: a display that carries
+#: its own number is an equation, not a row), applied to the other side of
+#: the comparison. A starred environment numbers nothing, so it stays one;
+#: rows carrying `\nonumber` are continuation lines and join the numbered row
+#: that follows them, which is how an author breaks one long equation.
+#:
+#: Over the 102 gold files this splits 18 rows out of 423 equations -- 17 in
+#: `align`, 1 in `gather`, none in `eqnarray`, whose 122 occurrences in this
+#: corpus are one equation each.
+_NUMBERED_ENV = {"align", "eqnarray", "gather", "alignat", "flalign"}
+
+
+def top_rows(body: str) -> list:
+    r"""Split on `\\` at brace depth 0 and outside any nested environment.
+
+    A regex cannot do this: `\\` inside a `cases`, an `array` or a `substack`
+    is a row of THAT, not of the display around it.
+    """
+    rows, buf, depth, env, i = [], [], 0, 0, 0
+    while i < len(body):
+        c = body[i]
+        if body.startswith(r"\begin{", i):
+            env += 1; buf.append(body[i:i + 7]); i += 7; continue
+        if body.startswith(r"\end{", i):
+            env -= 1; buf.append(body[i:i + 5]); i += 5; continue
+        if body.startswith("\\\\", i) and depth == 0 and env == 0:
+            rows.append("".join(buf)); buf = []; i += 2
+            while i < len(body) and body[i] in " \n\t":
+                i += 1
+            if i < len(body) and body[i] == "[":      # `\\[2mm]`, a skip
+                j = body.find("]", i)
+                if 0 < j < i + 12:
+                    i = j + 1
+            continue
+        if c == "\\" and i + 1 < len(body) and not body[i + 1].isalpha():
+            buf.append(body[i:i + 2]); i += 2; continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        buf.append(c); i += 1
+    rows.append("".join(buf))
+    return rows
+
+
+def numbered_rows(env: str, body: str) -> list:
+    """One entry per equation NUMBER this environment produces."""
+    if env.endswith("*") or env.rstrip("*") not in _NUMBERED_ENV:
+        return [body]
+    rows = top_rows(body)
+    if len(rows) < 2:
+        return [body]
+    out, pending = [], []
+    for r in rows:
+        pending.append(r)
+        if not re.search(r"\\nonumber|\\notag", r):
+            out.append("\\\\".join(pending)); pending = []
+    if pending:                      # a trailing unnumbered row
+        out.append("\\\\".join(pending))
+    out = [r for r in out if r.strip()]
+    return out or [body]
+
+
 def gold_equations(tex: Path) -> list:
     """Display maths from the author's LaTeX, in document order.
 
@@ -138,7 +214,10 @@ def gold_equations(tex: Path) -> list:
             # one.
             body = (_ENV_ARG.sub("", m.group(1))
                     if env.startswith("alignat") else m.group(1))
-            out.append((m.start(), env, strip_noise(body)))
+            for k, row in enumerate(numbered_rows(env, body)):
+                # Ordering only: the rows of one environment keep their order
+                # among themselves and stay where the environment was.
+                out.append((m.start() + k, env, strip_noise(row)))
             seen.append((m.start(), m.end()))
 
     def covered(pos):
