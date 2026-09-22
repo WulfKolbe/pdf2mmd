@@ -486,3 +486,63 @@ class TestTwoOperatorsDoNotShareOneLimitGroup:
         that the two paths cannot be confused for one another."""
         by_op = self._limits(self._scene(streams=False))
         assert by_op[153.32] == ([], [])
+
+
+class TestASubscriptIsNotUnderTheAccent:
+    r"""774 — the accent's base is found by CENTRE-IN-RANGE, and a subscript's
+    centre falls in that range too.
+
+    Page 673 of Obertelli & Sagawa, *Modern Nuclear Physics*, sets the
+    beta-equilibrium reaction `n + e^+ \rightleftharpoons p + \bar{\nu}_e`:
+
+        nu      [243.98, 248.90]  10.0pt   centre 246.44
+        macron  [246.65, 249.96]  10.0pt   window [245.15, 251.46]
+        e       [248.90, 252.00]   7.0pt   centre 250.45   <- swept in
+
+    which came out `\bar{\nu_{e}}` — the bar drawn over the subscript too,
+    a different symbol. TeX SCALES AN ACCENT TO ITS BASE, so a base is never
+    materially smaller than the accent above it.
+    """
+
+    def _scene(self, sub_size=7.0):
+        nu = g("nu", 10.0, 149.06, 243.98, "math-italic", "ν")
+        nu.rect = (243.98, 149.06, 248.90, 159.06)
+        mac = g("macron", 10.0, 149.06, 246.65, "math-symbol", "¯")
+        mac.rect = (246.65, 149.06, 249.96, 159.06)
+        e = g("e", sub_size, 147.57, 248.90, "text", "e")
+        e.rect = (248.90, 147.57, 252.00, 147.57 + sub_size)
+        return [nu, mac, e]
+
+    def _composed(self, glyphs):
+        out = structure._merge_accents(glyphs, 0)
+        return [x.tex.latex for x in out]
+
+    def test_the_bar_covers_the_nu_and_not_its_subscript(self):
+        assert self._composed(self._scene())[0] == r"\bar{\nu}"
+
+    def test_the_subscript_survives_as_its_own_glyph(self):
+        """Excluded from the accent, not discarded: `_attach_scripts` still
+        has to find it, or the reading loses a symbol without saying so."""
+        assert len(self._composed(self._scene())) == 2
+
+    def test_a_wide_accent_still_covers_several_full_size_glyphs(self):
+        r"""The guard is SIZE, not count. `\overline{xy}` covers two glyphs at
+        the accent's own size and must still compose both — the case
+        `_rule_role` records for `\overline{e_1 e_2 e_3}`."""
+        x = g("x", 10.0, 149.06, 240.0, "math-italic", "x")
+        x.rect = (240.0, 149.06, 245.0, 159.06)
+        y = g("y", 10.0, 149.06, 245.0, "math-italic", "y")
+        y.rect = (245.0, 149.06, 250.0, 159.06)
+        mac = g("macron", 10.0, 149.06, 240.0, "math-symbol", "¯")
+        mac.rect = (240.0, 149.06, 250.0, 159.06)
+        out = self._composed([x, mac, y])
+        assert out == [r"\bar{xy}"]
+
+    def test_an_accent_inside_an_exponent_still_composes(self):
+        """Scale-free: TeX sets the accent small along with what it covers,
+        so the RATIO holds wherever the group sits."""
+        nu = g("nu", 7.0, 149.06, 243.98, "math-italic", "ν")
+        nu.rect = (243.98, 149.06, 247.42, 156.06)
+        mac = g("macron", 7.0, 149.06, 245.85, "math-symbol", "¯")
+        mac.rect = (245.85, 149.06, 248.17, 156.06)
+        assert self._composed([nu, mac])[0] == r"\bar{\nu}"

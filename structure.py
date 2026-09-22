@@ -688,6 +688,31 @@ def _merge_accents(glyphs: list[GlyphNode],
             # accent is excluded.
             if g.baseline > a.baseline + 0.3 * a.size:
                 continue
+            # 774 -- A SUBSCRIPT IS NOT UNDER THE ACCENT.
+            #
+            # The base is whatever the accent spans horizontally, tested by
+            # CENTRE-IN-RANGE, and a subscript's centre falls in that range
+            # too. Page 673 of Obertelli & Sagawa sets the beta-equilibrium
+            # reaction `n + e^+ \rightleftharpoons p + \bar{\nu}_e`:
+            #
+            #     nu      [243.98, 248.90]  10.0pt   centre 246.44
+            #     macron  [246.65, 249.96]  10.0pt   window [245.15, 251.46]
+            #     e       [248.90, 252.00]   7.0pt   centre 250.45  <- swept in
+            #
+            # and it came out `\bar{\nu_{e}}` -- the bar drawn over the
+            # subscript as well, which is a different symbol. MathPix reads
+            # the same snippet `\bar{\nu}_e`, and the page agrees with
+            # MathPix.
+            #
+            # TeX SCALES AN ACCENT TO ITS BASE, so a base is never materially
+            # smaller than the accent over it; 7.0 against 10.0 is a script.
+            # The baseline says the same thing -- the `e` sits 1.49pt low
+            # where a base is exactly level (the CMEX note above) -- but the
+            # size has the clearer margin, 0.70 against a 0.92 threshold, and
+            # it is scale-free: an accent inside an exponent is set small
+            # along with everything it covers.
+            if g.size < SCRIPT_SIZE_RATIO * a.size:
+                continue
             if width > 0.1 * a.size:
                 cx = 0.5 * (g.rect[0] + g.rect[2])
                 if a.rect[0] - 0.15 * a.size <= cx <= a.rect[2] + 0.15 * a.size:
