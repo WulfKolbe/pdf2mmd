@@ -780,3 +780,38 @@ def test_a_doublestroke_glyph_is_mathematics():
     formula rather than a display was dropped without trace."""
     import docmodel_six
     assert "doublestroke" in docmodel_six.MATH_FAMILIES
+
+
+class TestTheHorizontalHarpoonPair:
+    r"""771 — the AMS font names a harpoon by its BARBS, LaTeX by its heads.
+
+    1609.05293 page 11 sets `Cost(Q^{left} ⇌^{op} Q^{right})` from
+    GDXIPD+MSAM10 cid 10, whose embedded glyph name is `harpoonleftright`.
+    Read as a name it says left-then-right; rendered at 12x it is a top bar
+    with a RIGHT arrowhead over a bottom bar with a LEFT one, which is
+    `\rightleftharpoons`. The name and the macro read backwards from each
+    other, so this pair is settled by the rendering and pinned here.
+
+    Unmapped, the glyph reached the markdown as `(cid:10)` and took its span
+    with it — on a document MathPix reads correctly.
+    """
+
+    def test_harpoonleftright_is_rightleftharpoons(self):
+        assert texmap.project("math-symbol", "harpoonleftright").latex \
+            == r"\rightleftharpoons"
+
+    def test_harpoonrightleft_is_the_other_one(self):
+        assert texmap.project("math-symbol", "harpoonrightleft").latex \
+            == r"\leftrightharpoons"
+
+    def test_the_vertical_harpoons_are_unchanged(self):
+        """The four already mapped, which the name reads the same way round."""
+        for name, want in (("harpoonupright", r"\upharpoonright"),
+                           ("harpoonupleft", r"\upharpoonleft"),
+                           ("harpoondownright", r"\downharpoonright"),
+                           ("harpoondownleft", r"\downharpoonleft")):
+            assert texmap.project("math-symbol", name).latex == want
+
+    def test_it_is_mathematics_not_an_unknown(self):
+        t = texmap.project("math-symbol", "harpoonleftright")
+        assert t.kind != "unknown" and t.latex is not None

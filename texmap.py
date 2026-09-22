@@ -401,6 +401,16 @@ _AMS = {
     "harpoonupright": r"\upharpoonright", "harpoonupleft": r"\upharpoonleft",
     "harpoondownright": r"\downharpoonright",
     "harpoondownleft": r"\downharpoonleft",
+    # 771 -- THE HORIZONTAL PAIR, and the font names it by its BARBS while
+    # LaTeX names it by its arrowheads, so the two read backwards from each
+    # other. Settled by rendering, not by the name: 1609.05293 page 11 sets
+    # `Cost(Q^{left} <op> Q^{right})` from GDXIPD+MSAM10 cid 10, glyph
+    # `harpoonleftright`, and at 12x the top bar carries a RIGHT arrowhead
+    # over a bottom bar carrying a LEFT one. Right over left is
+    # `\rightleftharpoons`. MathPix reads that document correctly; we
+    # emitted `(cid:10)` and deferred the span.
+    "harpoonleftright": r"\rightleftharpoons",
+    "harpoonrightleft": r"\leftrightharpoons",
     "arrowparrrightleft": r"\rightleftarrows",
     "arrowparrleftright": r"\leftrightarrows",
     "whitediamond": r"\diamond", "blackdiamond": r"\blacklozenge",
