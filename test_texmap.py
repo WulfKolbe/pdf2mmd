@@ -815,3 +815,52 @@ class TestTheHorizontalHarpoonPair:
     def test_it_is_mathematics_not_an_unknown(self):
         t = texmap.project("math-symbol", "harpoonleftright")
         assert t.kind != "unknown" and t.latex is not None
+
+
+class TestTheSubstituteFontsSpellItalicShort:
+    r"""776 — `is_italic` decides whether a text-font letter on a display line
+    is a VARIABLE (775), so a name it does not recognise costs every variable
+    in that document.
+
+    Surveyed over the 7,376 distinct font names in the library, it refused 29
+    genuinely italic ones. URW's Nimbus faces are what Ghostscript and pdftex
+    substitute with, so they appear in anything that does not ship its own:
+
+        NimbusRomNo9L-ReguItal        483 documents
+        NimbusRomNo9L-MediItal        121
+        NimbusRomNo9L-Regu-Slant_167   35
+        StandardSymL-Slant_167         33
+
+    `ReguItal` carries neither the word "italic" nor a hyphen before "Ital",
+    which is what the old pattern required.
+    """
+
+    def test_the_urw_substitutes_are_italic(self):
+        for name in ("AAAAAA+NimbusRomNo9L-ReguItal",
+                     "AAAAAA+NimbusRomNo9L-MediItal",
+                     "AAAAAA+NimbusSanL-ReguItal",
+                     "AAAAAA+URWPalladioL-BoldItal"):
+            assert texmap.is_italic(name), name
+
+    def test_a_slanted_instance_is_italic_here(self):
+        """`Slant_167` is a slanted instance: italic for every purpose this
+        flag is used for."""
+        for name in ("AAAAAA+NimbusRomNo9L-Regu-Slant_167",
+                     "AAAAAA+StandardSymL-Slant_167",
+                     "AAAAAA+LMRomanSlant10-Regular"):
+            assert texmap.is_italic(name), name
+
+    def test_an_oblique_monospace_is_italic(self):
+        assert texmap.is_italic("AAAAAA+NimbusMonL-ReguObli")
+
+    def test_the_upright_faces_are_still_upright(self):
+        """The opposite error would put prose into mathematics. Checked over
+        every name in the library: no upright one matches."""
+        for name in ("AAAAAA+NimbusRomNo9L-Regu", "AAAAAA+Times-Roman",
+                     "AAAAAA+SFRM1000", "AAAAAA+CMR10",
+                     "AAAAAA+NimbusRomNo9L-Medi", "AAAAAA+Helvetica-Bold"):
+            assert not texmap.is_italic(name), name
+
+    def test_a_weight_suffix_does_not_make_it_upright(self):
+        r"""`LMMathItalic10-Regular` is italic; `-Regular` is its WEIGHT."""
+        assert texmap.is_italic("AAAAAA+LMMathItalic10-Regular")

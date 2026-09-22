@@ -114,10 +114,31 @@ FAMILY_RULES = [
 # (slanted) -- never the substring "it". Testing `endswith("it")` matched
 # nothing: `CMTI10` ends in "ti". The error made every Computer Modern italic
 # look upright, so variables were treated as operator names.
+#: 776 -- THE SUBSTITUTE FONTS SPELL IT SHORT.
+#:
+#: `is_italic` decides whether a text-font letter on a display line is a
+#: VARIABLE (775), so a name it does not recognise costs every variable in
+#: that document. Surveyed over 7,376 distinct font names in the library, it
+#: refused 29 genuinely italic ones -- and the top two are not rare:
+#:
+#:     NimbusRomNo9L-ReguItal     483 documents
+#:     NimbusRomNo9L-MediItal     121
+#:     NimbusRomNo9L-Regu-Slant_167 35   StandardSymL-Slant_167  33
+#:     NimbusSanL-ReguItal / NimbusMonL-ReguObli   16 each
+#:
+#: URW's Nimbus faces are what Ghostscript and pdftex substitute with, so
+#: they turn up in anything not shipping its own fonts. `ReguItal` carries
+#: neither the word "italic" nor a hyphen before "Ital", which is what the
+#: old pattern needed. `Slant_167` is a slanted instance and is italic for
+#: every purpose here.
+#:
+#: Checked for the opposite error: no upright name in those 7,376 matches.
+#: `LMMathItalic10-Regular` does, and should -- `-Regular` is its WEIGHT.
 _ITALIC_NAME = re.compile(
     r"italic|oblique|"
     r"\bcm(ti|mi|sl|bxti|bxsl|mib|itt)\d*|"
-    r"-(it|ital|italic|oblique)\b",
+    r"-(it|ital|italic|oblique)\b|"
+    r"ital\w*$|obli\w*$|slant",
     re.I,
 )
 
