@@ -1226,6 +1226,47 @@ def untrusted_name(fontname: str, glyphname: str | None) -> bool:
     return glyphname in _STANDARD_TEXT_NAMES
 
 
+#: 779 -- WHAT `mathabx.dcl` CALLS A SLOT, AND WHAT LaTeX CALLS IT.
+#:
+#: `MATHABX` is `mathabx.dcl` read out -- 573 (font, slot) -> name pairs --
+#: and until now it was consulted only by `texpackages`, to decide which
+#: packages a preamble needs. Nothing asked it what a CID means, so the two
+#: documents it was built from still lost their mathematics to
+#: `unmapped-glyph`: 31 of the corpus's 228 crops, all in wzlxjtu-001 and
+#: -002, the two AAAI templates that load the package.
+#:
+#: Its names are mathabx's MACRO names, not this table's glyph names, so a
+#: second step is needed -- and it is a LOOKUP, not `"\\" + name`. Guessing
+#: the macro would emit `\coasterisk` for slots nobody has verified; the
+#: rule here is to abstain instead, so a name absent from this dict leaves
+#: the glyph unmapped and the span defers exactly as it does today.
+#:
+#: These six are the ones those documents actually use. Each maps to THIS
+#: table's own canonical glyph name rather than to LaTeX directly, so the
+#: kind, the package registration and the dialect comparison all keep working
+#: from one place. `leq`/`geq` are the pair the comment above already checked
+#: against their surrounding formula.
+_MATHABX_TEX = {
+    "leq": "lessequal", "geq": "greaterequal",
+    "vert": "bar", "Vert": "bardbl",
+    "lbrace": "braceleft", "rbrace": "braceright",
+}
+
+
+def mathabx_slot(fontname: str, cid: int) -> str | None:
+    """The `mathabx.dcl` name for a slot of one of its fonts, or None."""
+    base = fontname.split("+")[-1].lower()
+    for fam in ("matha", "mathb", "mathx"):
+        if fam in base:
+            return MATHABX.get(fam, {}).get(cid)
+    return None
+
+
+def mathabx_tex(name: str | None) -> str | None:
+    """This table's glyph name for a `mathabx.dcl` name, or None to abstain."""
+    return _MATHABX_TEX.get(name or "")
+
+
 def tex_slot(fontname: str, cid: int) -> str | None:
     """The VERIFIED glyph name for a slot, or None."""
     base = fontname.split("+")[-1]

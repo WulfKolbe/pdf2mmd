@@ -2578,6 +2578,25 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                 verified = tex_slot(o.fontname, o.cid)
                 if verified:
                     gname = verified
+                # 779 -- AND ASK THE PACKAGE'S OWN DECLARATION FILE.
+                #
+                # `texmap.MATHABX` is `mathabx.dcl` read out, 573 (font,
+                # slot) -> name pairs, and it was consulted only by
+                # `texpackages` -- to decide which packages a PREAMBLE needs.
+                # Nothing ever asked it what a CID means, so the two
+                # documents it was built from still lost their mathematics:
+                # 31 of the corpus's 228 crops, all `unmapped-glyph`, all in
+                # wzlxjtu-001 and -002, the AAAI templates that load it.
+                #
+                # It runs after `tex_slot` because that table was verified by
+                # RENDERING each slot at 500dpi, which outranks a
+                # declaration file; and it abstains where the file is silent
+                # rather than guessing the macro from the name.
+                if not verified:
+                    _mx = texmap.mathabx_tex(
+                        texmap.mathabx_slot(o.fontname, o.cid))
+                    if _mx is not None:
+                        gname = _mx
                 elif untrusted_name(o.fontname, gname):
                     gname = None
                 if not gname:

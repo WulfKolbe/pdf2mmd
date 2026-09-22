@@ -864,3 +864,49 @@ class TestTheSubstituteFontsSpellItalicShort:
     def test_a_weight_suffix_does_not_make_it_upright(self):
         r"""`LMMathItalic10-Regular` is italic; `-Regular` is its WEIGHT."""
         assert texmap.is_italic("AAAAAA+LMMathItalic10-Regular")
+
+
+class TestTheMathabxDeclarationFileNamesItsOwnSlots:
+    r"""779 — `MATHABX` is `mathabx.dcl` read out, 573 (font, slot) → name
+    pairs, and it was consulted only by `texpackages` — to decide which
+    packages a PREAMBLE needs. Nothing ever asked it what a CID means.
+
+    So the two documents it was built from still lost their mathematics:
+    31 of the corpus's crops, all `unmapped-glyph`, all in wzlxjtu-001 and
+    -002, the AAAI templates that load the package. `matha` slot 0xA4 comes
+    back from pdfminer as `dcaron`; the package declares it `leq`.
+    """
+
+    def test_the_slot_lookup_finds_the_declared_name(self):
+        for cid, want in ((164, "leq"), (165, "geq")):
+            assert texmap.mathabx_slot("AAAAAA+TeX-matha10", cid) == want
+
+    def test_it_knows_the_three_fonts(self):
+        assert texmap.mathabx_slot("AAAAAA+TeX-mathx10", 7) == "vert"
+        assert texmap.mathabx_slot("AAAAAA+TeX-mathb10", 5) == "square"
+
+    def test_a_font_it_does_not_cover_gets_nothing(self):
+        assert texmap.mathabx_slot("AAAAAA+CMMI10", 164) is None
+
+    def test_a_slot_the_package_does_not_declare_gets_nothing(self):
+        r"""`mathabx.dcl` declares neither matha 112 nor 113, and they occur
+        73 times each. Abstaining there is the point."""
+        assert texmap.mathabx_slot("AAAAAA+TeX-matha10", 112) is None
+
+    def test_the_name_maps_onto_this_table_s_own_glyph_name(self):
+        """Not to LaTeX directly — so kind, package registration and the
+        dialect comparison keep working from one place."""
+        assert texmap.mathabx_tex("leq") == "lessequal"
+        assert texmap.project("math-symbol", "lessequal").latex == r"\leq"
+
+    def test_an_undeclared_name_abstains_rather_than_guessing(self):
+        r"""`"\\" + name` would emit `\coasterisk` for slots nobody has
+        verified. A name absent here leaves the glyph unmapped and the span
+        defers exactly as before."""
+        assert texmap.mathabx_tex("coasterisk") is None
+        assert texmap.mathabx_tex(None) is None
+
+    def test_the_rendered_table_still_outranks_the_declaration(self):
+        r"""`tex_slot` was verified by rendering each slot at 500dpi, which
+        outranks a declaration file."""
+        assert texmap.tex_slot("AAAAAA+TeX-matha10", 112) == "parenleft"
