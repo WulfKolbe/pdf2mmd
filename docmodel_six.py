@@ -303,6 +303,37 @@ def _spans(line: "LineNode") -> list[Span]:
     dom = _dominant_size(line.glyphs)
     ordered = sorted(line.glyphs, key=lambda g: g.rect[0])
     mathish = {id(g) for g in ordered if g.is_math}
+    # 775 -- IS THIS LINE A DISPLAY? The absorption rules below are calibrated
+    # against a WORD SPACE, and a line with no words in it has none: `_word_gap`
+    # on page 673 of Obertelli & Sagawa measures 1.42pt, which is the kerning
+    # between letters, while TeX's space around a binary operator is 2.5-4.1pt.
+    # Every variable on that line therefore failed `_tight`.
+    #
+    # The test is WORDS, not a letter ratio. Borrowing the fraction rule's
+    # `letters <= 0.35 * glyphs` refused this very line: `n + e^+ <-> p +
+    # \bar{\nu}_e` is 4 letters in 11 glyphs against a bound of 3.85, because
+    # an equation written in particle symbols is mostly Latin letters by
+    # construction. Its SECOND line passed and its first did not -- one
+    # display, two spellings.
+    #
+    # What separates prose from a display is that prose has words: three or
+    # more letters running together. A display has single variables. That is
+    # the line-scale form of what `_is_variable_run` already says about a run.
+    _n_math = sum(1 for g in ordered if g.is_math)
+    _word_run = _longest = 0
+    _prev = None
+    for _g in ordered:
+        _alpha = (not _g.is_math) and _g.text.strip().isalpha()
+        if _alpha and _prev is not None and (
+                _g.rect[0] - _prev.rect[2] < 0.3 * max(dom, 1.0)):
+            _word_run += 1
+        elif _alpha:
+            _word_run = 1
+        else:
+            _word_run = 0
+        _prev = _g if _alpha else None
+        _longest = max(_longest, _word_run)
+    _mostly_math = bool(ordered) and _n_math >= 0.25 * len(ordered) and _longest < 3
     # Glyphs forced to TEXT regardless of the font they came from. `is_math`
     # follows the font family, and a `<` borrowed from the maths font is
     # still punctuation when it is glued to a word.
@@ -582,13 +613,46 @@ def _spans(line: "LineNode") -> list[Span]:
                 # A run already forced to text -- monospace, or a glued
                 # relation -- must not be absorbed back into mathematics.
                 forced = any(id(gl) in textish for gl in run)
-                absorb = (not forced
-                          and ((left and _solid(i - 1))
-                               or (right and _solid(i + 1)))
+                # 775 -- A SINGLE ITALIC LETTER ON A DISPLAY LINE IS A
+                # VARIABLE, and it is not kerned against its neighbour.
+                #
+                # `_tight` exists to keep prose words -- `on`, `and`, `is` --
+                # out of the mathematics beside them, and it measures the
+                # line's own word space. On a line that is ALL mathematics
+                # there is no word space to measure, so the threshold comes
+                # out at kerning scale and the ordinary spacing TeX puts
+                # around an operator looks like a paragraph break.
+                #
+                # Obertelli & Sagawa page 673: `n + e^+ <-> p + \bar{\nu}_e`.
+                # The `e` was rescued by the script rule above (its `+` proves
+                # its base is maths); `n` and `p` carry no script, so they
+                # stayed prose and came out `\text{n}`, `\text{p}` -- upright,
+                # where the page sets them italic, in a book whose maths Latin
+                # letters ARE Times-Italic (MathTime: the maths font holds the
+                # Greek and the symbols). One line, two spellings of the same
+                # kind of thing.
+                #
+                # ONE letter, not a run: `and` is three, and no relaxation
+                # here can reach it. Adjacency to mathematics is still
+                # required, and the line must be a display.
+                _solo = (_mostly_math and len(run) == 1
+                         and run[0].text.strip().isalpha()
+                         and is_italic(run[0].fontname))
+                _l_ok = left_any and _solid(i - 1) and (left or _solo)
+                _r_ok = right_any and _solid(i + 1) and (right or _solo)
+                absorb = (not forced and (_l_ok or _r_ok)
                           and _is_variable_run(run))
-                take_left = left and _solid(i - 1)
-                take_right = right and _solid(i + 1)
+                take_left = _l_ok
+                take_right = _r_ok
             if absorb:
+                # 775 -- ABSORBED MEANS MATHEMATICAL, and the next run along
+                # has to be able to see that. A run's kind is read off its
+                # FIRST glyph, so a text glyph absorbed on the LEFT of a maths
+                # run leaves the merged run starting with text -- and the next
+                # letter over then finds no mathematics beside it and stays
+                # prose. `n + p` came out `$n+$ \text{p}`: one absorbed, one
+                # not, for no reason on the page.
+                mathish.update(id(gl) for gl in run)
                 merged = list(run)
                 if take_left:
                     merged = runs[i - 1] + merged

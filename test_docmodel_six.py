@@ -2171,3 +2171,89 @@ class TestAScriptIsNotATextLineRunningAcrossTheBar:
 
     def test_with_nothing_beside_it_the_bar_is_a_fraction(self):
         assert self._role([]) == "fraction"
+
+
+class TestASingleItalicLetterOnADisplayLineIsAVariable:
+    r"""775 — `_tight` is calibrated against a word space, and a display line
+    has no words to measure one from.
+
+    Obertelli & Sagawa page 673 sets `n + e^+ ⇌ p + \bar{\nu}_e`. `_word_gap`
+    on that line measures 1.42pt — the kerning between letters — so `_tight`'s
+    threshold comes out at 0.50pt, while TeX's space around a binary operator
+    is 2.5–4.1pt. Every variable on the line failed it.
+
+    The `e` was rescued anyway (its `^+` proves its base is maths); `n` and
+    `p` carry no script, so they stayed prose and were emitted `\text{n}`,
+    `\text{p}` — upright, where the page sets them italic, in a book whose
+    maths Latin letters ARE Times-Italic. One display, two spellings.
+    """
+
+    SP = 2.8          # TeX's space around a binary operator, at 10pt
+
+    #: the glyph NAME matters: `_solid` refuses to absorb a run into a maths
+    #: run that cannot project, so the operator needs a name it can be read by.
+    NAMES = {"+": "plus", "=": "equal"}
+
+    def _g(self, text, x, *, fam, size=10.0, font="QTJSUC+Times-Italic10"):
+        n = g(self.NAMES.get(text, text), family=fam, size=size,
+              baseline=100.0, x=x, text=text)
+        n.fontname = font
+        n.rect = (x, 100.0, x + 5.0, 110.0)
+        return n
+
+    def _line(self, glyphs, type_="formula"):
+        from docmodel_six import LineNode
+        return LineNode(id="l", page=1, type=type_, glyphs=glyphs,
+                        rect=(0, 95, 400, 115))
+
+    def _reaction(self):
+        """`n + p` — an italic letter, an operator, an italic letter."""
+        x = 0.0
+        out = []
+        for text, fam in (("n", "text"), ("+", "math-symbol"), ("p", "text")):
+            font = ("JAAHIM+MTSYN10" if fam != "text"
+                    else "QTJSUC+Times-Italic10")
+            out.append(self._g(text, x, fam=fam, font=font))
+            x += 5.0 + self.SP
+        return out
+
+    def test_the_variables_join_the_mathematics(self):
+        spans = self._line(self._reaction()).spans
+        assert [s.kind for s in spans] == ["math"], \
+            [(s.kind, "".join(g.text for g in s.glyphs)) for s in spans]
+
+    def test_a_word_beside_the_mathematics_is_still_prose(self):
+        r"""One letter, not a run: `and` is three and no relaxation here can
+        reach it."""
+        gl = self._reaction()
+        x = 40.0
+        for c in "and":
+            gl.append(self._g(c, x, fam="text"))
+            x += 5.0
+        kinds = [s.kind for s in self._line(gl).spans]
+        assert "text" in kinds, kinds
+
+    def test_a_prose_line_is_not_a_display(self):
+        r"""The relaxation applies only where there are no WORDS. A sentence
+        with an italic letter in it keeps that letter as prose."""
+        gl = []
+        x = 0.0
+        for c in "for":
+            gl.append(self._g(c, x, fam="text")); x += 5.0
+        x += 8.0
+        gl.append(self._g("x", x, fam="text")); x += 5.0 + self.SP
+        gl.append(self._g("=", x, fam="math-symbol", font="JAAHIM+MTSYN10"))
+        x += 5.0 + self.SP
+        for c in "and":
+            gl.append(self._g(c, x, fam="text")); x += 5.0
+        kinds = [s.kind for s in self._line(gl).spans]
+        assert kinds.count("text") >= 2, kinds
+
+    def test_an_upright_letter_is_not_swept_in_by_this_rule(self):
+        r"""The rule is about ITALIC letters — that is what italic MEANS in
+        mathematics. An upright one is an operator name or prose, and the
+        existing `_tight` test still governs it."""
+        gl = self._reaction()
+        gl[0] = self._g("n", 0.0, fam="text", font="QGCLFC+Times-Roman10")
+        kinds = [s.kind for s in self._line(gl).spans]
+        assert "text" in kinds, kinds
