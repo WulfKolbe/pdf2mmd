@@ -2257,3 +2257,65 @@ class TestASingleItalicLetterOnADisplayLineIsAVariable:
         gl[0] = self._g("n", 0.0, fam="text", font="QGCLFC+Times-Roman10")
         kinds = [s.kind for s in self._line(gl).spans]
         assert "text" in kinds, kinds
+
+
+class TestAFlippedMatrixIsNotARotation:
+    r"""778 — 2002.06055 draws its blackboard letters from a font pdfminer
+    cannot resolve (`fontname` is the literal "unknown") with a FLIPPED text
+    matrix, (1, 0, 0, -1, x, y).
+
+    Two things follow from that matrix and both were wrong. pdfminer computes
+    `size` 0.120 and a box 0.16pt tall while the advance is 8.160; and it
+    reports `upright` False, which sent the glyph to the ROTATED pipeline —
+    where a stamp or a margin note belongs, not a symbol in a formula.
+
+    The author wrote `(\Hilb, \cotimes, \fieldc)`. It came out
+    `(\mathrm{Hilb}, \hat{\otimes}, )`: a symbol dropped between a comma and
+    a bracket, with nothing to show it had gone.
+    """
+
+    def _char(self, matrix, size=0.12, adv=8.16, x=202.44, base=618.12):
+        from pdfminer.layout import LTChar
+        return {"matrix": matrix, "size": size, "adv": adv,
+                "rect": (x, base, x + adv, base + 0.16)}
+
+    def test_rotation_lives_in_b_and_c(self):
+        """A 90-degree stamp has them NON-zero, and must stay refused — that
+        is what keeps `arXiv:0805.0311v3` out of the prose."""
+        stamp = (0.0, 1.0, -1.0, 0.0, 30.0, 700.0)
+        assert not (abs(stamp[1]) < 1e-6 and abs(stamp[2]) < 1e-6)
+
+    def test_a_vertical_flip_has_neither(self):
+        """(1, 0, 0, -1) reflects the glyph's own y axis: the text still
+        reads left to right."""
+        flip = (1.0, 0.0, 0.0, -1.0, 202.44, 618.12)
+        assert abs(flip[1]) < 1e-6 and abs(flip[2]) < 1e-6
+
+    def test_the_flipped_glyph_reaches_the_reading(self):
+        """End to end on the page it was found on."""
+        import docmodel_six as D
+        pdf = "/home/wkolbe/pdfdrill-library/2002.06055/2002.06055.pdf"
+        if not os.path.exists(pdf):
+            pytest.skip("library PDF not present")
+        doc = D.build(pdf, range(30, 31))
+        line = next(ln for pg in doc for ln in pg.lines
+                    if "Hilb" in D._run_text(ln.glyphs))
+        assert not line.rotated
+        assert any(g.fontname == "unknown" for g in line.glyphs), \
+            D._run_text(line.glyphs)[:60]
+
+    def test_its_size_is_repaired_from_the_page(self):
+        r"""Nothing advances sixty-eight times its own height. The
+        contradiction is inside the glyph; the page supplies the replacement
+        and the matrix supplies the baseline."""
+        import docmodel_six as D
+        pdf = "/home/wkolbe/pdfdrill-library/2002.06055/2002.06055.pdf"
+        if not os.path.exists(pdf):
+            pytest.skip("library PDF not present")
+        doc = D.build(pdf, range(30, 31))
+        odd = [g for pg in doc for ln in pg.lines for g in ln.glyphs
+               if g.fontname == "unknown"]
+        assert odd, "the flipped glyphs are not in any line"
+        for g in odd:
+            assert g.size > 1.0, (g.text, g.size)
+            assert g.rect[3] - g.rect[1] > 1.0, (g.text, g.rect)

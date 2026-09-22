@@ -2596,7 +2596,30 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                         text=o.get_text(), cid=o.cid, glyphname=gname,
                         fontname=o.fontname, family=fam, size=o.size,
                         tex=project(fam, gname, o.cid, o.fontname), matrix=o.matrix,
-                        upright=bool(o.upright),
+                        # 778 -- A FLIPPED MATRIX IS NOT A ROTATION.
+                        #
+                        # Rotation lives in the matrix's b and c. A matrix
+                        # (1, 0, 0, -1, x, y) has neither: it reflects the
+                        # glyph's own y axis, which is what a producer that
+                        # works in screen coordinates emits, and the text
+                        # still reads left to right. pdfminer calls it
+                        # not-upright, and this reader sends anything
+                        # not-upright to the ROTATED pipeline -- where it is
+                        # treated as a stamp or a margin note and kept out of
+                        # the flow entirely.
+                        #
+                        # 2002.06055 draws its blackboard letters that way.
+                        # The `\fieldc` of `(\Hilb, \cotimes, \fieldc)`
+                        # became a one-glyph rotated line of its own and the
+                        # reading came out `(\mathrm{Hilb}, \hat{\otimes},
+                        # )` -- a symbol dropped between a comma and a
+                        # bracket with nothing to show it had gone.
+                        #
+                        # A real 90-degree stamp has b and c NON-zero
+                        # (0, 1, -1, 0) and is still refused, which is what
+                        # keeps `arXiv:0805.0311v3` out of the prose.
+                        upright=bool(o.upright) or (abs(o.matrix[1]) < 1e-6
+                                                    and abs(o.matrix[2]) < 1e-6),
                         color=to_rgb(getattr(
                             getattr(o, "graphicstate", None), "ncolor", None)),
                         stream=stream_by_page.get(pno, {}).get(
@@ -2620,6 +2643,35 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                     rules.append(RuleNode(id=f"p{pno}r{n}", page=pno, rect=o.bbox))
 
         page_size = _dominant_size(glyphs)
+
+        # 778 -- A GLYPH CANNOT ADVANCE 8.16pt WHILE BEING 0.12pt TALL.
+        #
+        # 2002.06055 draws its blackboard letters from a font pdfminer cannot
+        # resolve at all -- `fontname` comes back as the literal string
+        # "unknown" -- with a FLIPPED text matrix, (1, 0, 0, -1, x, y). From
+        # that pdfminer computes `size` 0.120 and a box 0.16pt tall, while the
+        # advance is 8.160 and the origin sits exactly on the line's baseline.
+        #
+        # The box is what line grouping clusters on, so the letter was placed
+        # in no line at all and the author's `(\Hilb, \cotimes, \fieldc)`
+        # came out `(\mathrm{Hilb}, \hat{\otimes}, )` -- a symbol dropped
+        # silently between a comma and a bracket, which is the failure this
+        # project treats as worse than a crop.
+        #
+        # The contradiction is INSIDE THE GLYPH and needs no page context to
+        # see: nothing advances sixty-eight times its own height. What the
+        # page supplies is the replacement size, and the matrix supplies the
+        # baseline it is drawn on -- both of which were right all along.
+        if page_size > 0:
+            for _g in glyphs:
+                if _g.size >= 0.2 * page_size:
+                    continue
+                _adv = _g.rect[2] - _g.rect[0]
+                if _adv < 0.2 * page_size:
+                    continue          # a genuinely tiny glyph: leave it
+                _base = _g.matrix[5]
+                _g.size = page_size
+                _g.rect = (_g.rect[0], _base, _g.rect[2], _base + page_size)
         for r in rules:
             r.role = _rule_role(r, glyphs, page_size, rules)
 

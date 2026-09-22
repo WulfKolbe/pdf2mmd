@@ -371,6 +371,25 @@ _MATH_SYMBOL = {
 }
 _SYMBOL_ACCENTS = {"circumflex", "tilde", "caron", "macron", "dieresis",
                    "ring", "breve", "acute", "grave", "dotaccent"}
+
+# 777 -- THE UNICODE SPELLING OF THE SAME ACCENT.
+#
+# A font that names its glyphs after Unicode calls a combining accent
+# `<name>cmb` -- U+0302 COMBINING CIRCUMFLEX ACCENT is `circumflexcmb`.
+# MnSymbol does, and page 31 of 2002.06055 sets the author's
+# `\newcommand{\cotimes}{\widehat{\otimes}}` as `circlemultiply` with a
+# `circumflexcmb` over it. Unmapped, the accent could not compose, the span
+# carried an unaccounted glyph, and the whole line -- a numbered item in a
+# list of monoidal categories -- came out as an IMAGE CROP:
+#
+#     $\bullet (\mathrm{Hilb},$ ![unmapped-glyph:circumflexcmb](…jpg)
+#
+# Every accent in the table above has this twin and none of them was
+# listed, so the aliases are DERIVED rather than retyped: a tenth entry
+# added above would otherwise need remembering here.
+_MATH_SYMBOL.update({name + "cmb": _MATH_SYMBOL[name]
+                     for name in _SYMBOL_ACCENTS if name in _MATH_SYMBOL})
+_SYMBOL_ACCENTS |= {name + "cmb" for name in tuple(_SYMBOL_ACCENTS)}
 # Occurs in the corpus but NOT verified against a font encoding table.
 # `circlecopyrt` was refused as unverified. RENDERED at 600dpi from a journal
 # front page it is unmistakable: the ring of a copyright sign, with a
