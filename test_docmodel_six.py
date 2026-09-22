@@ -2319,3 +2319,67 @@ class TestAFlippedMatrixIsNotARotation:
         for g in odd:
             assert g.size > 1.0, (g.text, g.size)
             assert g.rect[3] - g.rect[1] > 1.0, (g.text, g.rect)
+
+
+class TestACodeListingIsNotABandOfScripts:
+    r"""780 — 733 places a band of scripts onto the row holding their bases,
+    and asks whether a row IS such a band by size alone: anything under
+    0.95 of the page's dominant size qualifies.
+
+    A listing is set smaller than the body — `\ttfamily\tiny` is the ordinary
+    choice — so on a 10pt page every 6pt line of code qualified, and 733
+    dissolved it, placing its glyphs per-glyph onto whatever rows the stream
+    pointed at. 2604.22294 sets 25 `lstlisting` blocks that way; page 19 came
+    out as 14 lines where the page has 28, every other line break gone and
+    the spaces with it:
+
+        ## Ordering and Retrieval Questions- The schema should not contain…
+
+    In a listing a line break is CONTENT.
+    """
+
+    SPAN = 10.0
+
+    def _g(self, text, x, size, font):
+        n = g(None, family="text", size=size, baseline=300.0, x=x, text=text)
+        n.fontname = font
+        n.rect = (x, 300.0, x + 0.5 * size, 300.0 + size)
+        return n
+
+    def _row(self, font, size=6.0):
+        return [self._g(c, 100.0 + 3.0 * i, size, font)
+                for i, c in enumerate("def f(x):")]
+
+    def _is_band(self, row):
+        from docmodel_six import _off_row_band
+        return _off_row_band(row, [], self.SPAN)
+
+    def test_a_typewriter_row_is_never_a_band(self):
+        assert self._is_band(self._row("AAAAAA+CMTT10")) is False
+
+    def test_however_small_it_is(self):
+        """`\tiny` inside a 10pt page is the ordinary case, not an oddity."""
+        assert self._is_band(self._row("AAAAAA+CMTT10", size=4.0)) is False
+
+    def test_a_proportional_row_of_that_size_is_still_a_band(self):
+        """The guard is the FACE, not the size — 733 keeps working for the
+        script bands it was written for."""
+        assert self._is_band(self._row("AAAAAA+CMR10")) is True
+
+    def test_one_monospace_glyph_is_enough_to_refuse_the_row(self):
+        r"""A script inside code is still code."""
+        row = self._row("AAAAAA+CMR10")
+        row[3] = self._g("x", 109.0, 6.0, "AAAAAA+CMTT10")
+        assert self._is_band(row) is False
+
+    def test_the_listing_survives_end_to_end(self):
+        import docmodel_six as D
+        pdf = "/home/wkolbe/pdfdrill-library/2604.22294/2604.22294.pdf"
+        if not os.path.exists(pdf):
+            pytest.skip("library PDF not present")
+        doc = D.build(pdf, range(18, 19))
+        verbatim = [ln for pg in doc for ln in pg.lines if ln.verbatim]
+        assert len(verbatim) >= 25, len(verbatim)
+        joined = [ln for ln in verbatim
+                  if len({round(x.baseline, 2) for x in ln.glyphs}) > 1]
+        assert not joined, "two rows of the listing merged into one line"

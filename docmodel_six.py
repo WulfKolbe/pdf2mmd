@@ -944,6 +944,27 @@ def _off_row_band(grp: list, rules: list, span_pt: float) -> bool:
     is what makes it a numerator or a denominator rather than a term of the
     row. That is evidence the page drew, not an inference about size.
     """
+    # 780 -- A CODE LISTING IS NOT A BAND OF SCRIPTS.
+    #
+    # 733 places a band of scripts onto the row holding their bases, and asks
+    # whether a row is such a band by SIZE alone. A listing is set smaller
+    # than the body -- `\ttfamily\tiny` is the ordinary choice -- so on a
+    # 10pt page every 6pt line of code qualified, and 733 dissolved it,
+    # placing its glyphs per-glyph onto whatever rows the stream pointed at.
+    #
+    # 2604.22294 sets 25 `lstlisting` blocks that way. Page 19 came out as 14
+    # lines where the page has 28, with every other line break gone and the
+    # spaces with it:
+    #
+    #     ## Ordering and Retrieval Questions- The schema should not contain…
+    #
+    # In a listing a line break is CONTENT. `_spans` already refuses to call
+    # a monospace glyph mathematics whatever its family says; the same holds
+    # a level up -- a row set in a typewriter face is a line of code, and a
+    # script inside code is still code.
+    if any(is_monospace(g.fontname) for g in grp):
+        return False
+
     for g in grp:
         if g.size < 0.95 * span_pt:
             continue                     # a script: off-row by size
