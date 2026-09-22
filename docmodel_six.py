@@ -1318,6 +1318,52 @@ def _is_plain_rule(rect: Rect) -> bool:
     return (h <= 2.0 and w > 2.0) or (w <= 2.0 and h > 2.0)
 
 
+def _tiles(rects: list[Rect]) -> set:
+    """Indices of marks that STACK into a contiguous band of one width.
+
+    781d — THE DISCRIMINATING FEATURE, WHICH THE NOTE BELOW SAYS WAS NEVER
+    FOUND: a listing's marks TILE and a figure's do not.
+
+    listings sets a framed, backgrounded listing LINE BY LINE. Measured on
+    a four-line listing with `frame=single` and `backgroundcolor`:
+
+        LTRect  56.69 715.48 555.31 725.35    the background behind line 1
+        LTRect  56.69 705.62 555.31 715.48    ... line 2, abutting exactly
+        LTRect  56.69 695.76 555.31 705.62    ... line 3
+        LTLine  51.51 715.48  51.51 725.35    the left frame, line 1
+        LTLine  51.51 705.62  51.51 715.48    ... line 2
+
+    Every one shares an x-range with its neighbours and begins where the
+    one above ended. Counting them as drawing made a four-line listing look
+    like a figure of twenty marks around forty glyphs, so the whole listing
+    was cropped away as a diagram -- glyphs and frame rules together, which
+    is why nothing downstream could see either.
+
+    A box-and-arrow figure has marks at many x-ranges and heights and
+    stacks nowhere. Three is the smallest run that can be a band rather
+    than a coincidence.
+    """
+    by: dict = {}
+    for i, r in enumerate(rects):
+        by.setdefault((round(r[0]), round(r[2])), []).append(i)
+    out: set = set()
+    for idx in by.values():
+        if len(idx) < 3:
+            continue
+        idx.sort(key=lambda i: rects[i][1])
+        run = [idx[0]]
+        for j in idx[1:]:
+            if rects[j][1] <= rects[run[-1]][3] + 1.0:
+                run.append(j)
+            else:
+                if len(run) >= 3:
+                    out |= set(run)
+                run = [j]
+        if len(run) >= 3:
+            out |= set(run)
+    return out
+
+
 def _diagram_regions(glyphs: list["GlyphNode"],
                      strokes: list[Rect] | None = None) -> list[Rect]:
     """Bounding rectangles of the diagrams on a page.
@@ -1431,7 +1477,9 @@ def _diagram_regions(glyphs: list["GlyphNode"],
         # kept. Marks-on-the-border versus marks-inside was tried as a
         # replacement and separated neither cleanly. The cases overlap, and
         # the discriminating feature has not been found yet.
-        drawn = sum(1 for r in cl if not _is_plain_rule(r))
+        _tiled = _tiles(cl)
+        drawn = sum(1 for i, r in enumerate(cl)
+                    if not _is_plain_rule(r) and i not in _tiled)
         if enclosed > 25 and enclosed > 5 * max(drawn, 1):
             continue
         # Nor is a sliver a figure. The gutter rule of a framed listing is a

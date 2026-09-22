@@ -25,6 +25,9 @@ scripts produce.
 | `lstscore.py` | the LISTING gold set read back and scored — the peer of `canon.py` |
 | `lstroundtrip.py` | LaTeX → PDF → pdf2mmd → LaTeX → PDF → pdf2mmd: does the projection re-read? |
 | `lstgoldcheck.py` | is the gold set sound — errors, and how much of each page IS the listing |
+| `lstprobe.py` | the frame probe: one body, every frame style, with and without an image |
+| `lstkeywords.py` | the keyword lists `listings` itself ships, read out of its `.sty` files |
+| `lstlang.py` / `langdetect.py` | language guessing, measured against the declared gold |
 
 ## The loop
 
@@ -152,6 +155,21 @@ while 96 compiled with errors and 23 pages did not show the listing at all
 `!` lines instead, and measures how much of each rendered page is the
 listing the file was built for. After repair: 39 of 291 carry errors, all
 cosmetic, and no page fails to show its listing.
+
+### The frame probe
+
+```bash
+python3 lstprobe.py
+```
+
+One body, every frame style, with and without a PNG above it — fourteen
+files under `lstgold/probe/`. They are synthetic and that is the point:
+with `frame=single`, `lines`, `tb`, `shadowbox` or `trBL`, pdf2mmd found
+**zero** listings, because `listings` sets a framed listing line by line
+and twenty marks around forty glyphs read as a dense figure, so the block
+was cropped away as a diagram. `frame=none` and `leftline` worked, which is
+why 291 gold listings from real papers never showed it. 4 of 14 before the
+fix, 14 of 14 after.
 
 ### The round trip
 

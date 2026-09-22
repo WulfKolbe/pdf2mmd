@@ -264,6 +264,52 @@ class TestTheFrame:
         assert L.frames(rules, span_pt=8.0) == []
 
 
+class TestMarksThatTile:
+    """A listing is set LINE BY LINE, so its marks stack; a figure's do not.
+
+    Measured on a four-line `frame=single` listing with a background:
+
+        LTRect  56.69 715.48 555.31 725.35    background, line 1
+        LTRect  56.69 705.62 555.31 715.48    line 2, abutting exactly
+        LTRect  56.69 695.76 555.31 705.62    line 3
+    """
+
+    def test_a_stack_of_equal_bands_is_tiling(self):
+        import docmodel_six as D
+        rects = [(56.69, 715.48, 555.31, 725.35),
+                 (56.69, 705.62, 555.31, 715.48),
+                 (56.69, 695.76, 555.31, 705.62)]
+        assert D._tiles(rects) == {0, 1, 2}
+
+    def test_two_bands_are_not_a_stack(self):
+        import docmodel_six as D
+        rects = [(56.69, 715.48, 555.31, 725.35),
+                 (56.69, 705.62, 555.31, 715.48)]
+        assert D._tiles(rects) == set()
+
+    def test_a_gap_breaks_the_stack(self):
+        import docmodel_six as D
+        rects = [(56.0, 700.0, 555.0, 710.0),
+                 (56.0, 690.0, 555.0, 700.0),
+                 (56.0, 600.0, 555.0, 610.0)]
+        assert D._tiles(rects) == set()
+
+    def test_scattered_marks_do_not_tile(self):
+        import docmodel_six as D
+        rects = [(10.0, 700.0, 40.0, 710.0), (80.0, 660.0, 130.0, 690.0),
+                 (200.0, 610.0, 260.0, 640.0), (35.0, 500.0, 300.0, 505.0),
+                 (150.0, 520.0, 152.0, 600.0)]
+        assert D._tiles(rects) == set()
+
+    def test_the_two_sides_of_a_frame_are_two_stacks(self):
+        import docmodel_six as D
+        rects = []
+        for lo, hi in ((715.48, 725.35), (705.62, 715.48), (695.76, 705.62)):
+            rects.append((51.51, lo, 51.71, hi))
+            rects.append((555.31, lo, 555.51, hi))
+        assert D._tiles(rects) == set(range(6))
+
+
 class TestTheFontNameThatOnlyTheMeasurementKnew:
     def test_sftt_is_typewriter(self):
         """cm-super's T1 typewriter. lst-278: 21,928 advances, 51 letters,
