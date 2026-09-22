@@ -189,6 +189,15 @@ def is_drawing(fontname: str) -> bool:
 # mathematics turns `<omtext xml:id="foo">` into `$<$ omtext xml:id="foo" $>$`.
 _MONO_NAME = re.compile(
     r"\bcm(tt|sltt|itt|tex|vtt)\d*|"
+    # 781 -- SFTT is TeX's OWN typewriter in T1 (cm-super), and the measured
+    # route cannot see it on a short document: `measure_monospace` needs 100
+    # advances and 10 distinct letters before it will call a font monospace,
+    # and a four-line listing has forty glyphs. Three of the first twelve
+    # gold listings read back as prose for exactly this reason. The name is
+    # admissible here because the measurement CONFIRMS it wherever there is
+    # enough of it: lst-278, 21,928 advances in SFTT0800, 51 letters,
+    # advance/size 0.531 on 100.0% of them.
+    r"\bsftt\d*|"
     r"courier|consol|monaco|menlo|inconsolata|nimbusmon|lmmono|"
     r"mono(space)?\d*$|mono[a-z]*\d*$|-tt\b",
     re.I,

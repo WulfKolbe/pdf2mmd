@@ -23,6 +23,7 @@ scripts produce.
 | `eqtable_716.py` | the four-column table — No, gold, MathPix, pdf2mmd |
 | `test_table.py` | the table pipeline, fed deliberately malformed elements |
 | `lstscore.py` | the LISTING gold set read back and scored — the peer of `canon.py` |
+| `lstroundtrip.py` | LaTeX → PDF → pdf2mmd → LaTeX → PDF → pdf2mmd: does the projection re-read? |
 
 ## The loop
 
@@ -135,6 +136,20 @@ each line; `escapechar` marks LaTeX that never reaches the page at all; and
 on that list: leading whitespace is content, and in Python it is the block
 structure, so it is compared and reported SEPARATELY — a loss there cannot
 hide inside a high text score.
+
+### The round trip
+
+A projection that cannot be re-read is not a projection.
+
+```bash
+python3 lstroundtrip.py            # ~25 min over the 307
+```
+
+Each gold file is compiled (generation 1), read, projected, compiled again
+(generation 2) and read again. If the two readings differ, the `.tex` we
+wrote does not set the page we read, and the difference names the property
+that was lost. It writes `lstgold/roundtrip.json` and leaves both
+generations in `lstgold/pdf/` and `lstgold/again/`.
 
 Sources are e-prints held in the library; provenance is per file. Local
 test material, not for redistribution. Nothing under `texzip/` or named

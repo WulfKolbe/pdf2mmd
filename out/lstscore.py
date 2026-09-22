@@ -55,10 +55,18 @@ def strip_escapes(body: str, tex: str) -> str:
 
 
 def strip_numbers(lines: list, tex: str) -> list:
-    """Drop a leading line number where the listing asked for one."""
+    """Drop a leading line number where the listing asked for one.
+
+    A BLANK code line is numbered too, and then the number is the whole of
+    what the page shows on that row. `rows()` has already dropped the blank
+    line from the gold, so the reading's numbered blank must go as well --
+    otherwise a listing with two blank lines can never score 1.00 no matter
+    how exactly it was read.
+    """
     if not _NUMBERS.search(tex):
         return lines
-    return [re.sub(r"^\s*\d+\s", "", x) for x in lines]
+    out = [re.sub(r"^\s*\d+(\s|$)", "", x) for x in lines]
+    return [x for x in out if x.strip()]
 
 
 def rows(text: str) -> list:
@@ -119,11 +127,14 @@ def score(tex_path: Path) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--json", default="")
     A = ap.parse_args()
     files = sorted(GOLD.glob("lst-*.tex"))
     if A.limit:
         files = files[:A.limit]
-    res = [score(f) for f in files]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        res = list(ex.map(score, files))
     read = [r for r in res if r["state"] == "read"]
     exact = [r for r in read if r["text"] >= 0.99]
     close = [r for r in read if 0.90 <= r["text"] < 0.99]
@@ -134,6 +145,9 @@ def main():
     if ind:
         print("   indent  kept on %.0f%% of lines, over the %d listing(s) that have any"
               % (100 * sum(r["indent"] for r in ind) / len(ind), len(ind)))
+    if A.json:
+        import json as _json
+        Path(A.json).write_text(_json.dumps(res, indent=1))
     for r in sorted(read, key=lambda r: r["text"])[:8]:
         print("      %-10s gold %3d read %3d  text %.2f  indent %.2f"
               % (r["id"], r["gold"], r["read"], r["text"], r["indent"]))

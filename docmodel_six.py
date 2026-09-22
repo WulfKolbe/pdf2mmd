@@ -38,6 +38,7 @@ from pdfminer.pdfparser import PDFParser
 from pdfminer.pdftypes import resolve1
 from pdfminer.layout import LTChar, LTCurve, LTImage, LTLine, LTRect
 
+import listings
 import texmap
 from texmap import (TexToken, family_of, greek_latex, is_drawing, space_class,
                     tex_slot, untrusted_name,
@@ -844,6 +845,10 @@ class PageNode:
     links: list[LinkNode] = field(default_factory=list)
     fills: list[FillNode] = field(default_factory=list)
     invisible: bool = False      # an OCR layer: refuse to project
+    #: 781 -- the grid properties of every code listing on this page, read
+    #: off the glyphs by `listings.accumulate` once the lines exist. The
+    #: projectors READ this; none of them measures a listing itself.
+    listings: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ U2 / U3
@@ -3517,6 +3522,9 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                 band.append(ln)
         _flush_band()
         page.lines = ordered
+        # The listing grid is measured HERE, on the finished lines, so that
+        # every projection reads one measurement instead of making its own.
+        page.listings = listings.accumulate(page)
         out.append(page)
     return out
 

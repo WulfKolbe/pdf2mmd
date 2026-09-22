@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass
 
 import docmodel_six as docmodel
+import listings
 import structure
 import texmap
 from docmodel_six import GlyphNode, LineNode, PageNode
@@ -1512,16 +1513,52 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                 fence_size = fence_size or max(
                     (g.size for ln in group for g in ln.glyphs
                      if texmap.is_monospace(g.fontname)), default=10.0)
-                text = " ".join(
-                    docmodel._run_text(
-                        ln.glyphs if line_numbers
-                        else _strip_gutter(ln.glyphs, fence_size),
-                        ln.spans[0].word_gap if ln.spans else 0)
-                    for ln in group).rstrip()
+                # 781 — THE GRID, WHERE THE PAGE IS ONE.
+                #
+                # `_run_text` reconstructs word breaks from a gap threshold,
+                # which is right for prose and wrong for code: leading space
+                # is not a gap between glyphs at all, so every indent was
+                # lost (measured: kept on 24% of the gold set's lines). A
+                # monospace listing has been measured into a grid by
+                # `listings.accumulate`, and its rows already carry both the
+                # indent and the interior runs of spaces.
+                _rows = [listings.listing_of(p, ln) for ln in group]
+                _lst = _rows[0] if _rows and all(
+                    r is not None and r is _rows[0] for r in _rows) else None
+                if _lst is not None:
+                    _by = {x.id: x for x in _lst.lines}
+                    _emit = []
+                    for ln in group:
+                        x = _by.get(ln.id)
+                        if x is None:
+                            continue
+                        # A BLANK CODE LINE IS A LINE. Its number is the only
+                        # mark it leaves on the page, and that number is
+                        # grouped into this row; dropping it closes up the
+                        # listing and moves every line after it.
+                        for n in x.blank_before:
+                            _emit.append(("%d " % n) if line_numbers else "")
+                        _emit.append(
+                            ((("%d " % x.number) if line_numbers
+                              and x.number is not None else "")
+                             + " " * x.indent + x.text).rstrip())
+                        for n in x.blank_after:
+                            _emit.append(("%d " % n) if line_numbers else "")
+                    # A blank line keeps its trailing space DELIBERATELY: the
+                    # number is the gutter, not the code, and `2` on its own
+                    # reads as a line whose content is the digit 2.
+                    texts = _emit
+                else:
+                    texts = [" ".join(
+                        docmodel._run_text(
+                            ln.glyphs if line_numbers
+                            else _strip_gutter(ln.glyphs, fence_size),
+                            ln.spans[0].word_gap if ln.spans else 0)
+                        for ln in group).rstrip()]
                 # Frame decoration is not code: the corner glyphs of a listing
                 # box come from a drawing font and render as `(cid:7)`.
-                text = re.sub(r"\(cid:\d+\)", "", text).strip()
-                if not text:
+                texts = [re.sub(r"\(cid:\d+\)", "", t).rstrip() for t in texts]
+                if not any(t.strip() for t in texts):
                     continue
                 if not fence_open:
                     out.append("")
@@ -1530,7 +1567,7 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                     fence_size = max(
                         (g.size for ln in group for g in ln.glyphs
                          if texmap.is_monospace(g.fontname)), default=10.0)
-                out.append(text)
+                out += texts
                 continue
             if fence_open:
                 out.append("```")
@@ -1869,6 +1906,86 @@ def _escape_in_text(t: str) -> str:
     return "".join(_TEXT_SPECIAL.get(c, c) for c in t)
 
 
+#: Characters a colour marker may be built from. Each gives an OPEN and a
+#: CLOSE string (`!<` / `>!`), and a colour is used only if neither occurs in
+#: the listing's own text -- a delimiter that collides with the code would
+#: swallow it silently, which is worse than a listing set in black.
+_MARKER_CHARS = "!?~|`"
+
+
+def _listing_tex(lst) -> str:
+    r"""A measured listing, written as the `lstlisting` that would set it.
+
+    781 — THE LaTeX PROJECTION OF A LISTING HAD NO LISTING IN IT.
+
+    Every code line went through the same span loop as prose, so a projected
+    `.tex` said
+
+        1 float b1[M], b2[M], out[N][M], avg[N][M]
+        \textcolor[rgb]{0.5,0.5,0.5}{2 a = 1.5}
+        3 for (i in 0..N)
+
+    which compiles -- all 307 gold listings recompiled -- and renders as ONE
+    JUSTIFIED PARAGRAPH. The line breaks and the indentation, which in a
+    listing are the content, are gone before LaTeX ever sees the file. The
+    markdown had a fence and the LaTeX had nothing, so the richer projection
+    was the poorer one.
+
+    Everything written here was measured by `listings.accumulate`: the type
+    size, the line numbers and their first value and step, the colours, the
+    background. `columns=fullflexible` + `keepspaces=true` is what makes
+    LaTeX set the spaces we counted rather than re-space the line itself.
+
+    Colour is carried by `moredelim`, not by `escapeinside`: an escape leaves
+    listing mode, so `_`, `#` and `&` inside the coloured run would have to be
+    escaped and the run would be re-spaced. `[is]` delimiters are invisible
+    and the text between them stays verbatim.
+    """
+    text = lst.text()
+    opts = [r"basicstyle=\ttfamily\fontsize{%.1f}{%.1f}\selectfont"
+            % (lst.size, 1.2 * lst.size),
+            "columns=fullflexible", "keepspaces=true"]
+    if lst.numbers:
+        opts += ["numbers=left", "firstnumber=%d" % lst.firstnumber,
+                 "stepnumber=%d" % lst.stepnumber,
+                 r"numberstyle=\tiny"]
+    decls: list[str] = []
+    marks: dict = {}
+    pool = [c for c in _MARKER_CHARS
+            if c + "<" not in text and ">" + c not in text]
+    for i, rgb in enumerate(lst.colors):
+        if not pool:
+            break                 # code that uses every marker: set it black
+        ch = pool.pop(0)
+        name = "lstclr%d" % i
+        decls.append(r"\definecolor{%s}{rgb}{%s}" % (name, _tex_color(rgb)))
+        # BRACED: the value carries `]`, and the environment's own optional
+        # argument would end at the first one -- `\begin{lstlisting}[...
+        # moredelim=**[is][\color{c}]{!<}{>!}]` dies with "File ended while
+        # scanning use of \lst@Delim@delim" and produces no PDF at all.
+        opts.append(r"moredelim={**[is][\color{%s}]{%s<}{>%s}}"
+                    % (name, ch, ch))
+        marks[rgb] = (ch + "<", ">" + ch)
+    if lst.background:
+        decls.append(r"\definecolor{lstbg}{rgb}{%s}" % _tex_color(lst.background))
+        opts.append(r"backgroundcolor=\color{lstbg}")
+    rows = []
+    for x in lst.lines:
+        body = " " * x.indent + x.text
+        for start, end, rgb in sorted(x.colors, reverse=True):
+            if rgb not in marks:
+                continue
+            o, c = marks[rgb]
+            a, b = start + x.indent, end + x.indent
+            body = body[:a] + o + body[a:b] + c + body[b:]
+        rows += [""] * len(x.blank_before)
+        rows.append(body)
+        rows += [""] * len(x.blank_after)
+    return "\n".join(decls
+                     + [r"\begin{lstlisting}[" + ",".join(opts) + "]"]
+                     + rows + [r"\end{lstlisting}"])
+
+
 def _flush_eq(out: list, rows: list) -> None:
     r"""Emit the rows collected for one display as a single environment."""
     if not rows:
@@ -1909,7 +2026,18 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
     for p in pages:
         out.append(f"% ---- page {p.page} ----")
         out.append(r"\newpage")
+        _done: set = set()
         for ln in p.lines:
+            # A code listing is projected whole, from the grid measured on
+            # the page, not line by line through the prose path.
+            _lst = listings.listing_of(p, ln)
+            if _lst is not None:
+                if id(_lst) not in _done:
+                    _done.add(id(_lst))
+                    _flush_eq(out, pending)
+                    pending = []
+                    out.append(_listing_tex(_lst))
+                continue
             lvl = heading_level(ln, fp)
             parts: list[str] = []
             raw: list[str] = []          # the same maths, without the `$`
@@ -2054,6 +2182,11 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
     # used, on the same condition.
     if "[H]" in body and "float" not in pkgs:
         pkgs.append("float")
+    if "lstlisting" in body and "listings" not in pkgs:
+        pkgs.append("listings")
+    if ("\\definecolor" in body or "\\textcolor" in body
+            or "\\colorbox" in body) and "xcolor" not in pkgs:
+        pkgs.append("xcolor")
     if unicode_fonts:
         pkgs.append("fontspec")
     # Characters the text font does not have. Prose does not go through
