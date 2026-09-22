@@ -248,6 +248,97 @@ def _number(lead) -> int | None:
     return int(t) if t.isdigit() else None
 
 
+# ------------------------------------------------------------- the frame
+#: A frame rule is thin. `_is_plain_rule` has already said so; this is the
+#: side it is thin on.
+def _horizontal(r) -> bool:
+    return (r.rect[3] - r.rect[1]) <= 2.0 and (r.rect[2] - r.rect[0]) > 20.0
+
+
+def _vertical(r) -> bool:
+    return (r.rect[2] - r.rect[0]) <= 2.0 and (r.rect[3] - r.rect[1]) > 2.0
+
+
+def _columns(vert) -> list:
+    """(x, y_bottom, y_top) for each stack of vertical segments.
+
+    `frame=single` does NOT draw one tall rule down each side. listings sets
+    the frame line by line, so a twelve-line listing has twelve segments per
+    side, each one line high and abutting the next:
+
+        lst-027   x=52.91   714.39..725.34
+                  x=52.91   703.43..714.39
+                  x=52.91   692.47..703.43
+
+    Read segment by segment, no side of the frame is ever as tall as the
+    box; stacked, they are.
+    """
+    by_x: dict = {}
+    for r in vert:
+        by_x.setdefault(round(r.rect[0], 0), []).append(r)
+    out = []
+    for seg in by_x.values():
+        seg.sort(key=lambda r: r.rect[1])
+        # The KEY is rounded so segments a hundredth apart stack; the x that
+        # comes back is the one actually drawn.
+        x = min(r.rect[0] for r in seg)
+        lo, hi = seg[0].rect[1], seg[0].rect[3]
+        for r in seg[1:]:
+            if r.rect[1] <= hi + 1.0:
+                hi = max(hi, r.rect[3])
+            else:
+                out.append((x, lo, hi))
+                lo, hi = r.rect[1], r.rect[3]
+        out.append((x, lo, hi))
+    return out
+
+
+def frames(rules, span_pt: float = 10.0) -> list:
+    r"""Rectangles drawn on the page that could enclose a listing.
+
+    The frame is the one boundary that does not depend on the font, and it
+    is the only thing that separates a listing from what surrounds it: the
+    glyph extent cannot. lst-027 --
+
+        frame     52.91 688.48 559.09 729.33
+        glyphs    48.32 688.28 566.86 739.09
+
+    -- is wider on the left because `numbers=left` sets the gutter OUTSIDE
+    the frame, wider on the right because of an escaped `\label`, and taller
+    because the caption sits above the box. A reader that takes the glyph
+    extent for the listing takes the caption with it.
+
+    A pair of horizontal rules of the same width, far enough apart, is the
+    candidate; vertical stacks at either end extend it sideways where the
+    author asked for a full box. `frame=tb` draws only the pair, which is
+    why the verticals are optional.
+    """
+    horiz = sorted((r for r in rules if _horizontal(r)), key=lambda r: -r.rect[1])
+    cols = _columns([r for r in rules if _vertical(r)])
+    out: list = []
+    for i, a in enumerate(horiz):
+        for b in horiz[i + 1:]:
+            if (abs(a.rect[0] - b.rect[0]) > 2.0
+                    or abs(a.rect[2] - b.rect[2]) > 2.0):
+                continue
+            lo, hi = b.rect[1], a.rect[3]
+            if hi - lo < 1.5 * span_pt:
+                continue
+            x0, x1 = a.rect[0], a.rect[2]
+            # A side counts when its stack covers the box to within one line:
+            # `framesep` leaves a gap of about 4pt at each end.
+            for cx, cy0, cy1 in cols:
+                if cy0 > lo + span_pt or cy1 < hi - span_pt:
+                    continue
+                if abs(cx - x0) < 2.0 * span_pt:
+                    x0 = min(x0, cx)
+                elif abs(cx - x1) < 2.0 * span_pt:
+                    x1 = max(x1, cx)
+            out.append((x0, lo, x1, hi))
+            break         # the NEXT rule down closes this box, not a later one
+    return out
+
+
 # --------------------------------------------------------------- the pass
 def _continues(ln) -> bool:
     """A short typewriter line inside an open block is still code.

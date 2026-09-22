@@ -24,6 +24,7 @@ scripts produce.
 | `test_table.py` | the table pipeline, fed deliberately malformed elements |
 | `lstscore.py` | the LISTING gold set read back and scored — the peer of `canon.py` |
 | `lstroundtrip.py` | LaTeX → PDF → pdf2mmd → LaTeX → PDF → pdf2mmd: does the projection re-read? |
+| `lstgoldcheck.py` | is the gold set sound — errors, and how much of each page IS the listing |
 
 ## The loop
 
@@ -136,6 +137,21 @@ each line; `escapechar` marks LaTeX that never reaches the page at all; and
 on that list: leading whitespace is content, and in Python it is the block
 structure, so it is compared and reported SEPARATELY — a loss there cannot
 hide inside a high text score.
+
+### Is the gold sound?
+
+```bash
+python3 lstgoldcheck.py --install
+```
+
+A PDF appearing is not evidence that a file compiled: LaTeX recovers from
+nearly everything and prints the rest of the source. The builder's check
+was "a PDF exists and is over 1000 bytes" and all 307 candidates passed it
+while 96 compiled with errors and 23 pages did not show the listing at all
+— one showed its own `\lstdefinelanguage` as body text. This asks for the
+`!` lines instead, and measures how much of each rendered page is the
+listing the file was built for. After repair: 39 of 291 carry errors, all
+cosmetic, and no page fails to show its listing.
 
 ### The round trip
 

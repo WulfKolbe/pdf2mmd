@@ -206,6 +206,64 @@ class TestTheLatexProjection:
         assert "?<for>?" in tex
 
 
+class TestTheFrame:
+    """lst-027, `frame=single`, measured off the page:
+
+        top    rule   56.69 729.33 555.31 729.33
+        left   rule   52.91 714.39  52.91 725.34    one PER LINE
+        left   rule   52.91 703.43  52.91 714.39
+        left   rule   52.91 692.47  52.91 703.43
+        right  rules  559.09, the same three bands
+        bottom rule   56.69 688.48 555.31 688.48
+
+        frame        52.91 688.48 559.09 729.33
+        glyph extent 48.32 688.28 566.86 739.09
+    """
+
+    def _rules(self):
+        from docmodel_six import RuleNode
+        out = [RuleNode(id="t", page=1, rect=(56.69, 729.33, 555.31, 729.53)),
+               RuleNode(id="b", page=1, rect=(56.69, 688.48, 555.31, 688.68))]
+        for i, (lo, hi) in enumerate([(714.39, 725.34), (703.43, 714.39),
+                                      (692.47, 703.43)]):
+            out.append(RuleNode(id="l%d" % i, page=1, rect=(52.91, lo, 53.11, hi)))
+            out.append(RuleNode(id="r%d" % i, page=1, rect=(559.09, lo, 559.29, hi)))
+        return out
+
+    def test_the_box_is_found(self):
+        got = L.frames(self._rules(), span_pt=8.0)
+        assert len(got) == 1
+        x0, y0, x1, y1 = got[0]
+        assert abs(x0 - 52.91) < 0.1 and abs(x1 - 559.09) < 0.1
+        assert abs(y0 - 688.48) < 0.1 and abs(y1 - 729.53) < 0.1
+
+    def test_a_side_is_one_rule_per_line_stacked(self):
+        """No single segment is as tall as the box; stacked, they are."""
+        cols = L._columns([r for r in self._rules() if L._vertical(r)])
+        assert len(cols) == 2
+        for _x, lo, hi in cols:
+            assert abs(hi - lo - (725.34 - 692.47)) < 0.1
+
+    def test_frame_tb_has_no_sides(self):
+        """`frame=tb` draws the pair and nothing else; the width is theirs."""
+        rules = [r for r in self._rules() if L._horizontal(r)]
+        got = L.frames(rules, span_pt=8.0)
+        assert len(got) == 1
+        assert abs(got[0][0] - 56.69) < 0.1 and abs(got[0][2] - 555.31) < 0.1
+
+    def test_two_rules_too_close_are_not_a_box(self):
+        from docmodel_six import RuleNode
+        rules = [RuleNode(id="a", page=1, rect=(56.0, 700.0, 555.0, 700.2)),
+                 RuleNode(id="b", page=1, rect=(56.0, 695.0, 555.0, 695.2))]
+        assert L.frames(rules, span_pt=8.0) == []
+
+    def test_rules_of_different_widths_are_not_a_box(self):
+        from docmodel_six import RuleNode
+        rules = [RuleNode(id="a", page=1, rect=(56.0, 729.0, 555.0, 729.2)),
+                 RuleNode(id="b", page=1, rect=(90.0, 688.0, 400.0, 688.2))]
+        assert L.frames(rules, span_pt=8.0) == []
+
+
 class TestTheFontNameThatOnlyTheMeasurementKnew:
     def test_sftt_is_typewriter(self):
         """cm-super's T1 typewriter. lst-278: 21,928 advances, 51 letters,

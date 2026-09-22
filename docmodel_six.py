@@ -849,6 +849,11 @@ class PageNode:
     #: off the glyphs by `listings.accumulate` once the lines exist. The
     #: projectors READ this; none of them measures a listing itself.
     listings: list = field(default_factory=list)
+    #: Rectangles DRAWN on the page that enclose something -- a listing's
+    #: `frame=single`, a table cell. The only boundary that does not depend
+    #: on the font, and the only one that separates a listing from the
+    #: caption above it. `listings.frames` assembles them from the rules.
+    frames: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ U2 / U3
@@ -3524,6 +3529,9 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
         page.lines = ordered
         # The listing grid is measured HERE, on the finished lines, so that
         # every projection reads one measurement instead of making its own.
+        # The frames come first: a listing's rectangle is the one it is
+        # drawn inside, where the author drew one.
+        page.frames = listings.frames(rules, span_pt)
         page.listings = listings.accumulate(page)
         out.append(page)
     return out
