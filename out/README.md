@@ -22,6 +22,7 @@ scripts produce.
 | `canon.py` | the dialect-aware comparison: is this reading right, however spelled |
 | `eqtable_716.py` | the four-column table — No, gold, MathPix, pdf2mmd |
 | `test_table.py` | the table pipeline, fed deliberately malformed elements |
+| `lstscore.py` | the LISTING gold set read back and scored — the peer of `canon.py` |
 
 ## The loop
 
@@ -109,3 +110,32 @@ things happen, in this order:
 dash means that source produced nothing for that equation. `no match` means
 the source produced blocks but none of them is this equation. Neither ever
 means the sources agree.
+
+
+## The listing gold set
+
+`~/pdfdrill-library/lstgold/` — 307 listings from 39 documents, each ONE
+`lstlisting` taken from an AUTHOR'S OWN e-print and reduced to what
+reproduces it: the listings preamble (`\definecolor`, `\lstset`,
+`\lstdefinestyle`, `\lstdefinelanguage`), the listing with its options, and
+a provenance header. Every file compiles under `pdflatex`; the 21 candidates
+that did not are excluded and the reasons are in its README.
+
+Built the same way as the math set and read the same way: the gold is the
+question, the page is the answer.
+
+```bash
+python3 lstscore.py --limit 20     # compile, read back, score
+```
+
+`lstscore` is dialect-aware for three things the PAGE does and the reader
+must follow — `numbers=left` really does print `1 `, `2 ` at the start of
+each line; `escapechar` marks LaTeX that never reaches the page at all; and
+`breaklines=true` wraps, so the wrapped form IS the page. Indentation is not
+on that list: leading whitespace is content, and in Python it is the block
+structure, so it is compared and reported SEPARATELY — a loss there cannot
+hide inside a high text score.
+
+Sources are e-prints held in the library; provenance is per file. Local
+test material, not for redistribution. Nothing under `texzip/` or named
+`evidence-*.tex` is used: those are MathPix's output and ours.
