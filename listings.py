@@ -495,6 +495,43 @@ def _continues(ln) -> bool:
                                    for g in ln.glyphs if g.text.strip())
 
 
+def _columns_of(run, spans) -> list:
+    """Split a run of lines into COLUMNS, by horizontal overlap.
+
+    781g — A BLOCK THAT CROSSED THE GUTTER MEASURED ITS INDENT FROM THE
+    OTHER COLUMN. Page 5 of 1804.10694v5 sets four listings in two columns;
+    read in band order, a verbatim run picks up lines from both, and `left`
+    -- the x of column 0 -- then comes from whichever column starts further
+    left. Every right-column line came back indented by 56 spaces.
+
+    Indentation can never be mistaken for a column here, because the test
+    is not x0 but OVERLAP: inside one column the lines overlap, since a
+    long line spans the indent of every other. Between columns nothing
+    overlaps at all -- the left column ends before the right begins. So the
+    split is the classic interval partition, and it is exact:
+
+        listing 3   x0 314.0 316.5 395.7          one column
+        listing 2   x0  60.5  70.7  73.2 314.0 ... two
+
+    A part of one line is not a column; those lines stay with the block
+    they came from rather than becoming a listing of their own.
+    """
+    order = sorted(range(len(run)), key=lambda i: spans[i][0])
+    parts, cur, edge = [], [order[0]], spans[order[0]][1]
+    for i in order[1:]:
+        if spans[i][0] > edge:
+            parts.append(cur)
+            cur, edge = [i], spans[i][1]
+        else:
+            cur.append(i)
+            edge = max(edge, spans[i][1])
+    parts.append(cur)
+    if len(parts) < 2 or any(len(x) < 2 for x in parts):
+        return [run]
+    # Reading order inside each column is the order they arrived in.
+    return [[run[i] for i in sorted(part)] for part in parts]
+
+
 def _blocks(page) -> list:
     """Maximal runs of verbatim lines, in reading order."""
     out: list = []
@@ -515,8 +552,14 @@ def _blocks(page) -> list:
     if len(run) >= 2:
         out.append(run)
     # A trailing continuation line is not evidence of anything on its own.
-    return [r if r[-1].verbatim else r[:-1] for r in out
-            if len(r) >= 2 and (r[-1].verbatim or len(r) > 2)]
+    out = [r if r[-1].verbatim else r[:-1] for r in out
+           if len(r) >= 2 and (r[-1].verbatim or len(r) > 2)]
+    split: list = []
+    for r in out:
+        spans = [(min(g.rect[0] for g in ln.glyphs),
+                  max(g.rect[2] for g in ln.glyphs)) for ln in r]
+        split += [c for c in _columns_of(r, spans) if len(c) >= 2]
+    return split
 
 
 def _fill_under(page, rect):
@@ -531,9 +574,55 @@ def _fill_under(page, rect):
     return best
 
 
+def _row_pitch(run) -> float:
+    """The distance between two rows of this block, measured."""
+    base = sorted({round(statistics.median([g.baseline for g in ln.glyphs]), 2)
+                   for ln in run if ln.glyphs}, reverse=True)
+    gaps = [a - b for a, b in zip(base, base[1:]) if a - b > 0.5]
+    return statistics.median(gaps) if gaps else 0.0
+
+
+def _merge_rows(run) -> list:
+    """[(line, glyphs)] with lines that share a ROW merged into one.
+
+    781g — A GLYPH SET 1.4pt LOW IS NOT A LINE OF ITS OWN.
+
+    `listings` does not set every character on the row's baseline. In
+    1804.10694v5 the multiplication star of `i0*32+i1` is placed 1.39pt
+    below the code it belongs to, and line grouping -- which has no idea
+    it is looking at a grid -- made it a line:
+
+        base 676.88   'int i = i0 32+i1'
+        base 675.49   '*'
+
+    so the listing came back with the star on its own row and a hole where
+    it should be, four times on one page. Against the author's own source
+    that was 4 of 22 lines wrong, and it was the ONLY thing wrong.
+
+    A block knows its row pitch -- here 7.17pt -- and 1.39 is a fifth of
+    it. Nothing closer than half a pitch can be a separate row.
+    """
+    pitch = _row_pitch(run)
+    if pitch <= 0:
+        return [(ln, list(ln.glyphs)) for ln in run]
+    rows: list = []
+    for ln in run:
+        if not ln.glyphs:
+            continue
+        base = statistics.median([g.baseline for g in ln.glyphs])
+        for row in rows:
+            if abs(row[2] - base) < 0.5 * pitch:
+                row[1].extend(ln.glyphs)
+                break
+        else:
+            rows.append([ln, list(ln.glyphs), base])
+    return [(r[0], sorted(r[1], key=lambda g: g.rect[0])) for r in rows]
+
+
 def accumulate(page) -> list:
     """Every listing on the page, with the properties that would set it."""
     out: list = []
+    boxes: list = []
     for run in _blocks(page):
         glyphs = [g for ln in run for g in ln.glyphs]
         mono = _mono(glyphs)
@@ -547,8 +636,7 @@ def accumulate(page) -> list:
             continue
         rows: list = []
         numbered = 0
-        for ln in run:
-            gs = sorted(ln.glyphs, key=lambda g: g.rect[0])
+        for ln, gs in _merge_rows(run):
             lead, code = _gutter(gs, size)
             if lead:
                 numbered += 1
@@ -581,6 +669,7 @@ def accumulate(page) -> list:
             # `morekeywords={[1]{[,{,}}}` and made the .tex uncompilable.
             _row.colors = _classify(_row.text, _row.colors)
             lst.ids.add(ln.id)
+        lst.ids |= {ln.id for ln in run}
         nums = [n for x in lst.lines
                 for n in (x.blank_before + [x.number] + x.blank_after)
                 if n is not None]
@@ -591,10 +680,17 @@ def accumulate(page) -> list:
         rect = (min(g.rect[0] for g in glyphs), min(g.rect[1] for g in glyphs),
                 max(g.rect[2] for g in glyphs), max(g.rect[3] for g in glyphs))
         lst.background = _fill_under(page, rect)
-        drawn = _encloses(getattr(page, "frames", ()), rect)
-        lst.rect, lst.framed = (drawn, True) if drawn else (rect, False)
+        lst.rect = rect
         lst.language, lst.language_source = _language(lst)
+        boxes.append(rect)
         out.append(lst)
+    # The frames are assigned once every block is known: a frame is a
+    # listing's only when it is around that listing ALONE.
+    for i, lst in enumerate(out):
+        drawn = _encloses(getattr(page, "frames", ()), boxes[i],
+                          [b for j, b in enumerate(boxes) if j != i])
+        if drawn:
+            lst.rect, lst.framed = drawn, True
     return out
 
 
@@ -639,15 +735,29 @@ def _language(lst) -> tuple:
     return (best, "keywords") if cover >= _LANG_COVER else ("", "")
 
 
-def _encloses(frames, rect):
-    """The smallest drawn frame that contains `rect`, or None.
+def _inside(frame, rect) -> bool:
+    return (frame[0] <= rect[0] + 2 and frame[2] >= rect[2] - 2
+            and frame[1] <= rect[1] + 2 and frame[3] >= rect[3] - 2)
 
-    Smallest, because a listing inside a table cell sits inside TWO drawn
-    rectangles and the inner one is the listing's.
+
+def _encloses(frames, rect, others) -> tuple | None:
+    """The smallest drawn frame around `rect` ALONE, or None.
+
+    781g — A BOX AROUND TWO LISTINGS IS NOT EITHER LISTING'S FRAME.
+
+    Page 5 of 1804.10694v5 draws three page-wide rules that band the
+    figures, and each band holds two listings side by side. Taking the
+    smallest enclosing rectangle gave BOTH of them the same rect and
+    called both framed -- which is exactly the over-claim the frame was
+    introduced to avoid, since the whole point of a drawn boundary is that
+    it says which glyphs belong to WHICH block.
+
+    So a frame is this listing's only when it contains this listing and no
+    other. Smallest still wins among those, because a listing in a table
+    cell sits inside two rectangles and the inner one is its own.
     """
     fit = [f for f in frames
-           if f[0] <= rect[0] + 2 and f[2] >= rect[2] - 2
-           and f[1] <= rect[1] + 2 and f[3] >= rect[3] - 2]
+           if _inside(f, rect) and not any(_inside(f, o) for o in others)]
     if not fit:
         return None
     return min(fit, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))

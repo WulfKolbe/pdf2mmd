@@ -2108,6 +2108,18 @@ def _merge_operator_names(glyphs: list["GlyphNode"]) -> list["GlyphNode"]:
             if any(g.family not in ("text", "text-cm") or len(g.text) != 1
                    or not g.text.isalpha() for g in run):
                 break
+            # 781g — NOT IN A TYPEWRITER FACE. TeX sets `\min` from the
+            # ROMAN maths font; it has no way to set an operator name in
+            # a monospace one. So three typewriter letters spelling `min`
+            # are three letters of CODE, and merging them wrote a LaTeX
+            # macro into a verbatim line -- page 5 of 1804.10694v5 came
+            # back as `for(i1 in 0..\min  ((N-2)%32,32)+2)`, which is the
+            # same defect MathPix reported to us from the other side:
+            # a code line that picked up maths habits. It also corrupts
+            # the SPACING, because the merged glyph keeps the first
+            # letter's x and the grid then counts two cells of gap.
+            if any(is_monospace(g.fontname) for g in run):
+                break
             size = run[0].size
             if any(abs(g.size - size) > 0.1
                    or abs(g.baseline - run[0].baseline) > 0.1 for g in run):
