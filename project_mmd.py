@@ -109,18 +109,9 @@ def profile(pages: list[PageNode]) -> FontProfile:
 # CMBX ("bold extended"), so matching only on "bold" loses every heading in
 # every Computer Modern document -- measured: 4 headings found where MathPix
 # found 17, because `CMBX12` did not look bold.
-_BOLD_NAME = re.compile(
-    r"bold|"                       # Times-Bold, Arial,Bold, ...
-    r"\bcm(bx|b|ssbx|bxti|bxsl)\d*|"  # Computer Modern bold family
-    r"\bcmssdc\d*|"                 # CM sans demi condensed
-    r"-(bd|bold|semibold|black|heavy)\b|"
-    r"(^|[^a-z])(bd|blk)\d*$",
-    re.I,
-)
-
-
-def _is_bold(fontname: str) -> bool:
-    return bool(_BOLD_NAME.search(fontname.split("+")[-1]))
+#: The font-family tests live in `texmap` with `is_italic` and
+#: `is_monospace`; this name stays because `structure` imports it.
+_is_bold = texmap.is_bold
 
 
 def _line_is_bold(lines) -> bool:
@@ -1906,11 +1897,35 @@ def _escape_in_text(t: str) -> str:
     return "".join(_TEXT_SPECIAL.get(c, c) for c in t)
 
 
-#: Characters a colour marker may be built from. Each gives an OPEN and a
-#: CLOSE string (`!<` / `>!`), and a colour is used only if neither occurs in
-#: the listing's own text -- a delimiter that collides with the code would
-#: swallow it silently, which is worse than a listing set in black.
-_MARKER_CHARS = "!?~|`"
+def _opt(key: str, value: str) -> str:
+    r"""One `lstlisting` option, braced when its value carries a bracket.
+
+    781f — AND THE SAME TRAP A SECOND TIME. `\begin{lstlisting}[...]` ends
+    its optional argument at the first unbraced `]`, so
+
+        morekeywords=[1]{float,for},keywordstyle=[1]{\color{lstclr0}}
+
+    ends at `[1]` and everything after it is silently dropped: the file
+    still compiles, the listing still sets, and NOTHING IS COLOURED. It
+    cost a round trip to see, because the only symptom is an absence.
+    `moredelim` died of this in 781 and the lesson did not generalise --
+    it is a property of the ARGUMENT, not of any one key.
+    """
+    if "[" in value or "]" in value:
+        return "%s={%s}" % (key, value)
+    return "%s=%s" % (key, value)
+
+
+def _style(rgb, bold: bool, italic: bool, name: str) -> str:
+    r"""A `listings` style, written the way listings writes one."""
+    out = []
+    if rgb is not None:
+        out.append(r"\color{%s}" % name)
+    if bold:
+        out.append(r"\bfseries")
+    if italic:
+        out.append(r"\itshape")
+    return "".join(out)
 
 
 def _listing_tex(lst) -> str:
@@ -1925,65 +1940,77 @@ def _listing_tex(lst) -> str:
         \textcolor[rgb]{0.5,0.5,0.5}{2 a = 1.5}
         3 for (i in 0..N)
 
-    which compiles -- all 307 gold listings recompiled -- and renders as ONE
+    which compiles -- all 307 gold listings compiled -- and renders as ONE
     JUSTIFIED PARAGRAPH. The line breaks and the indentation, which in a
-    listing are the content, are gone before LaTeX ever sees the file. The
-    markdown had a fence and the LaTeX had nothing, so the richer projection
-    was the poorer one.
+    listing are the content, are gone before LaTeX ever sees the file.
+
+    781e — AND THE BODY IS THE PROGRAM, SO NOTHING GOES IN IT.
+
+    The first repair carried colour with `moredelim` markers -- `!<for>!`
+    written into the code. That is backwards for a listing. A listing is
+    not an equation: an equation wants markup, and code wants a body a
+    compiler could be handed unchanged. The styling is a HEADER property
+    and `lstlisting` already has the vocabulary for it --
+    `keywordstyle` with `morekeywords`, `commentstyle`, `stringstyle` --
+    so the words go in the options and the body stays exactly what was
+    read off the page.
 
     Everything written here was measured by `listings.accumulate`: the type
-    size, the line numbers and their first value and step, the colours, the
-    background. `columns=fullflexible` + `keepspaces=true` is what makes
-    LaTeX set the spaces we counted rather than re-space the line itself.
-
-    Colour is carried by `moredelim`, not by `escapeinside`: an escape leaves
-    listing mode, so `_`, `#` and `&` inside the coloured run would have to be
-    escaped and the run would be re-spaced. `[is]` delimiters are invisible
-    and the text between them stays verbatim.
+    size, the line numbers and their first value and step, the styled
+    words, the comment and string styles, the background.
+    `columns=fullflexible` + `keepspaces=true` is what makes LaTeX set the
+    spaces we counted rather than re-space the line itself.
     """
-    text = lst.text()
     opts = [r"basicstyle=\ttfamily\fontsize{%.1f}{%.1f}\selectfont"
             % (lst.size, 1.2 * lst.size),
             "columns=fullflexible", "keepspaces=true"]
+    if lst.language:
+        opts.append("language=%s" % lst.language)
     if lst.numbers:
         opts += ["numbers=left", "firstnumber=%d" % lst.firstnumber,
-                 "stepnumber=%d" % lst.stepnumber,
-                 r"numberstyle=\tiny"]
+                 "stepnumber=%d" % lst.stepnumber, r"numberstyle=\tiny"]
     decls: list[str] = []
-    marks: dict = {}
-    pool = [c for c in _MARKER_CHARS
-            if c + "<" not in text and ">" + c not in text]
-    for i, rgb in enumerate(lst.colors):
-        if not pool:
-            break                 # code that uses every marker: set it black
-        ch = pool.pop(0)
-        name = "lstclr%d" % i
-        decls.append(r"\definecolor{%s}{rgb}{%s}" % (name, _tex_color(rgb)))
-        # BRACED: the value carries `]`, and the environment's own optional
-        # argument would end at the first one -- `\begin{lstlisting}[...
-        # moredelim=**[is][\color{c}]{!<}{>!}]` dies with "File ended while
-        # scanning use of \lst@Delim@delim" and produces no PDF at all.
-        opts.append(r"moredelim={**[is][\color{%s}]{%s<}{>%s}}"
-                    % (name, ch, ch))
-        marks[rgb] = (ch + "<", ">" + ch)
+    seen: dict = {}
+
+    def colour(rgb) -> str:
+        if rgb not in seen:
+            seen[rgb] = "lstclr%d" % len(seen)
+            decls.append(r"\definecolor{%s}{rgb}{%s}"
+                         % (seen[rgb], _tex_color(rgb)))
+        return seen[rgb]
+
+    # The styled words, grouped by the style they were given: one
+    # `keywordstyle` per group, which is how listings numbers them.
+    groups: dict = {}
+    for word, rgb, bold, italic in lst.keywords:
+        # A keyword list is written INSIDE the environment's optional
+        # argument, so a word carrying a brace or a bracket does not make a
+        # bad listing -- it makes an unreadable file. Refuse it here as
+        # well as upstream: one such word cost lst-095 its whole compile.
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word):
+            continue
+        groups.setdefault((rgb, bold, italic), []).append(word)
+    for i, (style, words) in enumerate(sorted(groups.items(),
+                                              key=lambda kv: -len(kv[1])), 1):
+        rgb, bold, italic = style
+        name = colour(rgb) if rgb is not None else ""
+        opts.append(_opt("morekeywords",
+                         "[%d]{%s}" % (i, ",".join(sorted(set(words))))))
+        opts.append(_opt("keywordstyle",
+                         "[%d]{%s}" % (i, _style(rgb, bold, italic, name))))
+    for kind, key in (("comment", "commentstyle"), ("string", "stringstyle")):
+        st = lst.style_of(kind)
+        if st is None:
+            continue
+        rgb, bold, italic = st
+        name = colour(rgb) if rgb is not None else ""
+        opts.append(_opt(key, "{%s}" % _style(rgb, bold, italic, name)))
     if lst.background:
-        decls.append(r"\definecolor{lstbg}{rgb}{%s}" % _tex_color(lst.background))
-        opts.append(r"backgroundcolor=\color{lstbg}")
-    rows = []
-    for x in lst.lines:
-        body = " " * x.indent + x.text
-        for start, end, rgb in sorted(x.colors, reverse=True):
-            if rgb not in marks:
-                continue
-            o, c = marks[rgb]
-            a, b = start + x.indent, end + x.indent
-            body = body[:a] + o + body[a:b] + c + body[b:]
-        rows += [""] * len(x.blank_before)
-        rows.append(body)
-        rows += [""] * len(x.blank_after)
+        opts.append(r"backgroundcolor=\color{%s}" % colour(lst.background))
     return "\n".join(decls
                      + [r"\begin{lstlisting}[" + ",".join(opts) + "]"]
-                     + rows + [r"\end{lstlisting}"])
+                     + [t for _n, t in lst.rows()]
+                     + [r"\end{lstlisting}"])
 
 
 def _flush_eq(out: list, rows: list) -> None:

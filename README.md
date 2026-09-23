@@ -33,7 +33,8 @@ fails — `pdf2mmd.sh` checks for them by name before it starts.
 | `pdf2mmd.py` | driver |
 | `docmodel_six.py` | the document model: glyphs, rules, lines, spans |
 | `structure.py` | fractions and scripts |
-| `listings.py` | the code-listing grid: cell, indent, gutter numbers, colour |
+| `listings.py` | the code-listing grid, its frame, and its style table |
+| `lstlangs.py` + `.json` | the keyword lists `listings` itself ships, for the language |
 | `texmap.py` | glyph identity → LaTeX, and font-family classification |
 | `project_mmd.py` | Markdown / LaTeX / crop links / headings |
 

@@ -275,6 +275,24 @@ def is_italic(fontname: str) -> bool:
     return bool(_ITALIC_NAME.search(fontname.split("+")[-1]))
 
 
+#: 781e -- moved here from `project_mmd`, where `structure` and `listings`
+#: both had to reach into a projector to ask a question about a FONT. The
+#: family tests belong together; the regex is unchanged.
+_BOLD_NAME = re.compile(
+    r"bold|"                          # Times-Bold, Arial,Bold, ...
+    r"\bcm(bx|b|ssbx|bxti|bxsl)\d*|"  # Computer Modern bold family
+    r"\bcmssdc\d*|"                   # CM sans demi condensed
+    r"-(bd|bold|semibold|black|heavy)\b|"
+    r"(^|[^a-z])(bd|blk)\d*$",
+    re.I,
+)
+
+
+def is_bold(fontname: str) -> bool:
+    """True if this font is a bold face."""
+    return bool(_BOLD_NAME.search(fontname.split("+")[-1]))
+
+
 def family_of(fontname: str) -> str:
     base = fontname.split("+")[-1]
     for rx, label in FAMILY_RULES:

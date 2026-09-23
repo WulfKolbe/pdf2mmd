@@ -50,7 +50,8 @@ PDF2MMD_TEST_LINES=/path/to/book.lines.json \
 | `pdf2mmd.py` | Driver |
 | `docmodel_six.py` | Document model (glyphs, rules, lines, spans) |
 | `structure.py` | Fractions and scripts |
-| `listings.py` | Code-listing grid (cell, indent, gutter numbers, colour) |
+| `listings.py` | Code-listing grid, frame rectangle, style table |
+| `lstlangs.py` | listings' own keyword lists, for naming the language |
 | `texmap.py` | Glyph identity → LaTeX |
 | `project_mmd.py` | Markdown/LaTeX output, headings, links |
 

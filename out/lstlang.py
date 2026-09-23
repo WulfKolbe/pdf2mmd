@@ -26,6 +26,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 GOLD = Path(os.environ.get("PDF2MMD_LSTGOLD",
@@ -33,6 +35,11 @@ GOLD = Path(os.environ.get("PDF2MMD_LSTGOLD",
 CODE = Path(os.environ.get("PDF2MMD_CODE", Path(__file__).resolve().parent.parent))
 LANG_PY = Path(os.environ.get("PDF2MMD_LANG_PY",
                               Path.home() / ".wtc-venv" / "bin" / "python"))
+# The reader's own modules -- `lstlangs` reads listings' keyword tables and
+# `docmodel_six` the page -- live one level up.
+if str(CODE) not in sys.path:
+    sys.path.insert(0, str(CODE))
+
 _LST = re.compile(r"\\begin\{lstlisting\}(?:\[([^\]]*)\])?\n(.*?)\\end\{lstlisting\}",
                   re.S)
 _DECL = re.compile(r"^% language\s*:\s*(.+)$", re.M)
@@ -82,6 +89,62 @@ def read_back(stem: str) -> str:
     return "\n".join(out)
 
 
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def coloured_words(stem: str) -> dict:
+    """{rgb: {word, ...}} for every SINGLE-WORD coloured run on the page.
+
+    `keywordstyle` paints a word iff that word is in the keyword list of
+    the language the author named, so these words are a subset of one
+    language's keywords. Whole-line runs are comments and quoted runs are
+    strings: neither is a keyword, and a run that is not one bare word is
+    neither of use here nor evidence of anything.
+    """
+    pdf = GOLD / "pdf" / (stem + ".pdf")
+    if not pdf.is_file():
+        return {}
+    try:
+        import docmodel_six as dm
+        pages = dm.build(str(pdf))
+    except Exception:                                       # noqa: BLE001
+        return {}
+    out: dict = {}
+    for p in pages:
+        for lst in p.listings:
+            for ln in lst.lines:
+                for r in ln.colors:
+                    w = ln.text[r.start:r.end].strip()
+                    if r.kind == "keyword" and _WORD.match(w):
+                        out.setdefault(r.rgb, set()).add(w)
+    return out
+
+
+def from_keywords(stem: str, table: dict) -> str:
+    """The language whose keyword list covers a coloured run, or "".
+
+    Each colour is tried on its own -- a page has a keyword colour, a
+    comment colour and a string colour, and only one of them is keywords.
+    The colour that covers some language best wins, and a tie between two
+    languages at the same coverage is an abstention: it means the words
+    seen do not tell them apart.
+    """
+    best, best_cov = "", 0.0
+    for _rgb, words in coloured_words(stem).items():
+        if len(words) < 2:
+            continue
+        import lstlangs as lstkeywords
+        r = lstkeywords.rank(words, table, top=2)
+        if not r:
+            continue
+        (name, cov, _h, _t) = r[0]
+        if len(r) > 1 and abs(r[1][1] - cov) < 1e-9:
+            continue                     # two languages fit equally: silent
+        if cov > best_cov:
+            best, best_cov = name, cov
+    return best if best_cov >= 0.75 else ""
+
+
 def guess(corpus: dict) -> dict:
     if not LANG_PY.is_file():
         return {}
@@ -116,6 +179,10 @@ def main() -> None:
     if A.limit:
         files = files[:A.limit]
     truth, bodies, readings, unmapped = {}, {}, {}, collections.Counter()
+    #: The keyword route needs NO alias map: `listings` shipped both the
+    #: language names the authors used and the keyword lists, so truth and
+    #: hypothesis come from one namespace.
+    own = {}
     for f in files:
         p = Path(f)
         tex = p.read_text(encoding="utf-8", errors="replace")
@@ -129,6 +196,7 @@ def main() -> None:
             readings[p.stem] = r
         if not d:
             continue
+        own[p.stem] = d
         if d not in ALIAS:
             unmapped[d] += 1
             continue
@@ -150,10 +218,30 @@ def main() -> None:
         sub = {k: v for k, v in truth.items() if k in got}
         hit, miss, wrong = score(sub, got)
         n = hit + miss
-        print("\n  guessed from %-20s %d of %d  (%.0f%%)"
+        print("\n  whats_that_code on %-18s %d of %d  (%.0f%%)"
               % (label, hit, n, 100 * hit / n if n else 0))
-        for (want, g), c in wrong.most_common(8):
+        for (want, g), c in wrong.most_common(6):
             print("       %-12s guessed %-14s %d" % (want, g, c))
+
+    # --- the keyword route, against listings' OWN language names ---------
+    import lstlangs as lstkeywords
+    table = lstkeywords.load()
+    kw_truth = {k: v for k, v in own.items() if v in table}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        kw_got = dict(zip(kw_truth,
+                          ex.map(lambda s: from_keywords(s, table), kw_truth)))
+    hit, miss, wrong = score(kw_truth, kw_got)
+    silent = sum(1 for v in kw_got.values() if not v)
+    n = hit + miss
+    print("\n  the KEYWORD table on the page   %d of %d  (%.0f%%)"
+          % (hit, n, 100 * hit / n if n else 0))
+    print("       abstained (no keyword colour, or a tie)  %d" % silent)
+    spoke = n - silent
+    if spoke:
+        print("       when it spoke                            %d of %d  (%.0f%%)"
+              % (hit, spoke, 100 * hit / spoke))
+    for (want, g), c in wrong.most_common(8):
+        print("       %-12s answered %-14s %d" % (want, g, c))
 
 
 if __name__ == "__main__":

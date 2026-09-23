@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""lstkeywords — the keyword lists `listings` itself ships, read out.
+r"""lstlangs — the keyword lists `listings` itself ships, read out.
 
 781e — ASK THE PACKAGE THAT PAINTED THE PAGE.
 
@@ -15,13 +15,16 @@ The precedent is `texmap.MATHABX`, which reads `mathabx.dcl` for the same
 reason: the producer's own declaration outranks anything inferred from
 what the glyph looks like.
 
+It lives here and not in `out/` because it is a READER capability, not a
+measurement: the same move `texmap` makes with `mathabx.dcl`.
+
 This is NOT a general language detector. It answers a narrower question --
 "which listings language would colour exactly these words?" -- and abstains
 when the answer is not unique. A listing whose keywords were never coloured
 leaves it nothing to work with, and it says so.
 
-    python3 lstkeywords.py --build   # write keywords.json beside this file
-    python3 lstkeywords.py for,float,int,while
+    python3 lstlangs.py --build   # write lstlangs.json beside this file
+    python3 lstlangs.py for,float,int,while
 """
 import argparse
 import json
@@ -30,7 +33,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TABLE = HERE / "lstkeywords.json"
+TABLE = HERE / "lstlangs.json"
 TEXMF = Path("/usr/share/texmf-dist/tex/latex/listings")
 
 _DEF = re.compile(r"\\lst@definelanguage(?:\[([^\]]*)\])?\{([^}]*)\}")

@@ -131,8 +131,9 @@ class TestColour:
         p = _page([ln, row("b1[j] = 1", 56.69, y=290.0)])
         lst = p.listings[0]
         assert lst.colors == [(1.0, 0.4, 0.0)]
-        s, e, rgb = lst.lines[0].colors[0]
-        assert lst.lines[0].text[s:e] == "for"
+        r = lst.lines[0].colors[0]
+        assert lst.lines[0].text[r.start:r.end] == "for"
+        assert r.kind == "keyword"
 
     def test_black_is_not_a_colour(self):
         p = _page([row("for (i in 0..N)", 56.69, y=300.0),
@@ -182,28 +183,23 @@ class TestTheLatexProjection:
         tex = M._listing_tex(self._lst())
         assert "keepspaces=true" in tex and "columns=fullflexible" in tex
 
-    def test_colour_is_carried_by_an_invisible_delimiter(self):
-        """Not `escapeinside`: an escape leaves listing mode, and then every
-        `_`, `#` and `&` in the run would have to be escaped."""
+    def test_the_style_is_a_header_property(self):
+        """A listing is not an equation. The body is the PROGRAM, so the
+        colouring goes in the options -- `morekeywords` with a
+        `keywordstyle` -- and nothing is written into the code."""
         tex = M._listing_tex(self._lst())
-        assert r"moredelim={**[is]" in tex
-        assert "!<for>!" in tex
+        assert "morekeywords={[1]{for}}" in tex
+        assert r"keywordstyle={[1]{\color{lstclr0}}}" in tex
 
-    def test_the_moredelim_value_is_braced(self):
-        r"""Unbraced, the `]` inside it ends the environment's own optional
-        argument and LaTeX produces NO PDF:
-        `! File ended while scanning use of \lst@Delim@delim.`"""
+    def test_nothing_is_written_into_the_body(self):
         tex = M._listing_tex(self._lst())
-        assert "moredelim=**" not in tex
+        body = tex.split("]\n", 1)[1].rsplit("\\end", 1)[0]
+        assert body.startswith("for (i in 0..N)\n  b1[j] = a*f1[i,j]")
+        for mark in ("!<", ">!", "moredelim", "textcolor"):
+            assert mark not in body
 
-    def test_a_marker_that_collides_is_not_used(self):
-        ln = row("for (i !< 0..N)", 56.69, y=300.0)
-        for gl in ln.glyphs[:3]:
-            gl.color = (1.0, 0.4, 0.0)
-        lst = _page([ln, row("b1[j] = 1", 56.69, y=290.0)]).listings[0]
-        tex = M._listing_tex(lst)
-        assert "!<for>!" not in tex
-        assert "?<for>?" in tex
+    def test_the_code_is_what_a_compiler_would_get(self):
+        assert self._lst().code == "for (i in 0..N)\n  b1[j] = a*f1[i,j]"
 
 
 class TestTheFrame:
@@ -262,6 +258,63 @@ class TestTheFrame:
         rules = [RuleNode(id="a", page=1, rect=(56.0, 729.0, 555.0, 729.2)),
                  RuleNode(id="b", page=1, rect=(90.0, 688.0, 400.0, 688.2))]
         assert L.frames(rules, span_pt=8.0) == []
+
+
+class TestTheHeader:
+    """The header/body split: everything ABOUT the listing on the outside,
+    and one plain-text program on the inside."""
+
+    def _lst(self):
+        ln = row("for (i in 0..N)", 56.69, y=300.0)
+        for gl in ln.glyphs[:3]:
+            gl.color = (1.0, 0.4, 0.0)
+        return _page([ln, row("b1[j] = a*f1[i,j]", 56.69 + 2 * CELL,
+                              y=290.0)]).listings[0]
+
+    def test_the_keywords_carry_their_layout(self):
+        assert self._lst().keywords == [("for", (1.0, 0.4, 0.0), False, False)]
+
+    def test_a_comment_is_not_a_keyword(self):
+        ln = row("// set the gain", 56.69, y=300.0)
+        for gl in ln.glyphs:
+            gl.color = (0.0, 0.6, 0.0)
+        lst = _page([ln, row("b1[j] = 1", 56.69, y=290.0)]).listings[0]
+        assert lst.keywords == []
+        assert lst.style_of("comment") == ((0.0, 0.6, 0.0), False, False)
+
+    def test_an_indented_line_is_sliced_at_the_right_place(self):
+        """The runs count from the first CODE glyph, so classifying them
+        against the indented row shifted every slice by the indent and
+        filed `[`, `{` and `}` as keywords. That reached
+        `morekeywords={[1]{[,{,}}}` and cost lst-095 its whole compile."""
+        ln = row("    for (j in 0..M)", 56.69 + 4 * CELL, y=300.0)
+        for gl in ln.glyphs[:3]:
+            gl.color = (1.0, 0.4, 0.0)
+        lst = _page([ln, row("b1[j] = 1", 56.69, y=290.0)]).listings[0]
+        assert [w for w, *_ in lst.keywords] == ["for"]
+
+    def test_the_projection_refuses_a_word_with_a_bracket(self):
+        """Belt as well as braces: such a word does not make a bad listing,
+        it makes an unreadable file."""
+        lst = self._lst()
+        lst.lines[0].text = "[ (i in 0..N)"
+        lst.lines[0].colors[0].start, lst.lines[0].colors[0].end = 0, 1
+        tex = M._listing_tex(lst)
+        assert "morekeywords" not in tex
+
+    def test_a_run_of_keywords_is_not_a_comment(self):
+        """`public static void` opens with no comment marker, so it stays
+        three keywords even though it is one colour reaching no line end."""
+        ln = row("public static void main", 56.69, y=300.0)
+        for gl in ln.glyphs:
+            gl.color = (1.0, 0.4, 0.0)
+        lst = _page([ln, row("b1[j] = 1", 56.69, y=290.0)]).listings[0]
+        assert [w for w, *_ in lst.keywords] == ["public", "static", "void",
+                                                 "main"]
+
+    def test_the_rectangle_is_the_glyphs_when_nothing_is_drawn(self):
+        lst = self._lst()
+        assert lst.rect is not None and not lst.framed
 
 
 class TestMarksThatTile:

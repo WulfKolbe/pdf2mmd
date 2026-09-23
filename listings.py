@@ -43,9 +43,11 @@ read it there and never re-measure.
 """
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass, field
 
+import lstlangs
 import texmap
 
 #: An advance is a whole number of cells to within this fraction of one.
@@ -59,13 +61,33 @@ GRID_SHARE = 0.9
 
 
 @dataclass
+class Run:
+    """A styled stretch of one line, located in its TEXT, not its glyphs.
+
+    781e — THE COLOURING IS A STYLE TABLE, NOT A MARK IN THE CODE.
+
+    The first projection wrote `moredelim` markers into the body -- `!<for>!`
+    -- which is exactly backwards for a listing: what a listing is FOR is a
+    body a compiler could be handed. The style belongs beside the code, the
+    way `lstlisting` itself says it: `keywordstyle`, `commentstyle`,
+    `stringstyle` and a list of words.
+    """
+    start: int
+    end: int
+    rgb: tuple
+    bold: bool = False
+    italic: bool = False
+    kind: str = "unknown"        # keyword | comment | string | unknown
+
+
+@dataclass
 class ListingLine:
     """One row of the grid."""
     id: str
     indent: int                  # cells from column 0
     text: str                    # WITHOUT the indent, gutter already dropped
     number: int | None = None    # the line number the page printed, if any
-    colors: list = field(default_factory=list)   # (start, end, rgb) in `text`
+    colors: list = field(default_factory=list)   # list[Run], over `text`
     #: Blank code lines, named by the numbers the page printed for them.
     #: A blank line emits no code glyph at all, so the only thing on the
     #: page that says it exists is its number in the gutter -- and that
@@ -88,15 +110,67 @@ class Listing:
     firstnumber: int = 1
     stepnumber: int = 1
     background: tuple | None = None
+    #: The listing's rectangle -- the frame the author DREW around it when
+    #: there is one, and the glyph extent otherwise. `framed` says which:
+    #: only the drawn frame is independent of the font, and only it
+    #: separates a listing from its gutter and its caption.
+    rect: tuple | None = None
+    framed: bool = False
+    #: What the page says the language is, and on what evidence.
+    language: str = ""
+    language_source: str = ""    # keywords | declared | detected | ""
+
+    @property
+    def code(self) -> str:
+        """THE PROGRAM. Plain text, no markup, tabs and spaces as measured.
+
+        This is the field a compiler or an interpreter could be handed, and
+        the reason a listing is not an equation: mathematics wants markup,
+        and code wants to be left alone.
+        """
+        return self.text()
+
+    @property
+    def keywords(self) -> list:
+        """(word, rgb, bold, italic) for every word the page STYLED.
+
+        `keywordstyle` paints a word iff it is in the keyword list of the
+        language the author named, so this is both the style table and the
+        strongest evidence on the page about which language that was --
+        see `out/lstkeywords.py`.
+        """
+        out, seen = [], set()
+        for ln in self.lines:
+            for r in ln.colors:
+                if r.kind != "keyword":
+                    continue
+                w = ln.text[r.start:r.end].strip()
+                key = (w, r.rgb, r.bold, r.italic)
+                if w and key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return out
+
+    def style_of(self, kind: str):
+        """(rgb, bold, italic) the page used for comments / strings, or None."""
+        seen: dict = {}
+        for ln in self.lines:
+            for r in ln.colors:
+                if r.kind == kind:
+                    seen[(r.rgb, r.bold, r.italic)] = seen.get(
+                        (r.rgb, r.bold, r.italic), 0) + 1
+        if not seen:
+            return None
+        return max(seen, key=seen.get)
 
     @property
     def colors(self) -> list:
         """Distinct colours used, in first-seen order."""
         seen: list = []
         for ln in self.lines:
-            for _s, _e, rgb in ln.colors:
-                if rgb not in seen:
-                    seen.append(rgb)
+            for r in ln.colors:
+                if r.rgb is not None and r.rgb not in seen:
+                    seen.append(r.rgb)
         return seen
 
     def rows(self) -> list:
@@ -159,6 +233,70 @@ def grid_text(glyphs, cell: float) -> str:
     return "".join(out)
 
 
+#: How a comment opens, across the languages the gold set carries. A
+#: comment is recognised by SHAPE, not by the language: it opens with one
+#: of these and runs to the end of the line, which no keyword ever does.
+_COMMENT_OPEN = ("//", "#", "%", "--", ";", "/*", "<!--", "!", "'")
+
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _kind(text: str, run) -> str:
+    """keyword | string | unknown for ONE run. Comments are decided by line.
+
+    A string is quoted at both ends; a keyword is one bare word. Anything
+    else is left unknown rather than guessed -- a style table with a wrong
+    entry recolours the wrong token on every page that uses it.
+    """
+    body = text[run.start:run.end].strip()
+    if not body:
+        return "unknown"
+    if len(body) >= 2 and body[0] == body[-1] and body[0] in "\"'`":
+        return "string"
+    if _IDENT.match(body):
+        return "keyword"
+    return "unknown"
+
+
+def _classify(text: str, runs: list) -> list:
+    """Name every run on a line, COMMENTS FIRST.
+
+    A comment is a property of the LINE, not of a run. The grid inserts the
+    spaces it measured, so a styled comment arrives as one run per word:
+
+        `// set the gain`  ->  '//'  'set'  'the'  'gain'
+
+    and each of `set`, `the`, `gain` is a bare word, so per-run
+    classification files three English words in the keyword table -- which
+    then recolours them as keywords on every page that table is used for.
+
+    What separates a comment from a run of keywords is that the comment
+    REACHES THE END OF THE LINE and opens with a marker, and that no
+    keyword sequence does both. So the tail is taken first and merged into
+    one run; whatever is left is classified run by run. `public static
+    void` stays three keywords, because it opens with none of the markers.
+    """
+    if not runs:
+        return runs
+    end = len(text.rstrip())
+    for i, r in enumerate(runs):
+        if not text[r.start:r.end].strip().startswith(_COMMENT_OPEN):
+            continue
+        tail = runs[i:]
+        style = (tail[0].rgb, tail[0].bold, tail[0].italic)
+        if tail[-1].end < end:
+            continue
+        if any((t.rgb, t.bold, t.italic) != style for t in tail):
+            continue
+        merged = Run(r.start, tail[-1].end, r.rgb, r.bold, r.italic, "comment")
+        runs = runs[:i] + [merged]
+        break
+    for r in runs:
+        if r.kind == "unknown":
+            r.kind = _kind(text, r)
+    return runs
+
+
 def _color_runs(glyphs, cell: float) -> list:
     """(start, end, rgb) over `text` for every non-black run.
 
@@ -169,21 +307,24 @@ def _color_runs(glyphs, cell: float) -> list:
     runs: list = []
     pos = 0
     prev = None
-    for i, g in enumerate(glyphs):
+    for g in glyphs:
         if prev is not None:
-            pos += max(0, int(round((g.rect[0] - prev.rect[0])
-                                    / cell)) - 1)
+            pos += max(0, int(round((g.rect[0] - prev.rect[0]) / cell)) - 1)
         start = pos
         pos += len(g.text)
         prev = g
         rgb = g.color
-        if rgb is None or max(rgb) < 0.02 and min(rgb) < 0.02:
+        if rgb is None or (max(rgb) < 0.02 and min(rgb) < 0.02):
             rgb = None
-        if runs and runs[-1][2] == rgb and runs[-1][1] == start:
-            runs[-1] = (runs[-1][0], pos, rgb)
+        bold = texmap.is_bold(g.fontname)
+        italic = texmap.is_italic(g.fontname)
+        if (runs and runs[-1].rgb == rgb and runs[-1].end == start
+                and runs[-1].bold == bold and runs[-1].italic == italic):
+            runs[-1].end = pos
         else:
-            runs.append((start, pos, rgb))
-    return [(a, b, c) for a, b, c in runs if c is not None]
+            runs.append(Run(start, pos, rgb, bold, italic))
+    # A run in the basic style is not a style: it is the listing.
+    return [r for r in runs if r.rgb is not None or r.bold or r.italic]
 
 
 # ----------------------------------------------------------- the gutter
@@ -432,6 +573,13 @@ def accumulate(page) -> list:
                 id=ln.id, indent=max(0, indent), text=text.rstrip(),
                 number=own, blank_before=before, blank_after=after,
                 colors=_color_runs(code, cell)))
+            _row = lst.lines[-1]
+            # UNINDENTED: `_color_runs` counts from the first code glyph, so
+            # a run's offsets index `text`, not the indented row. Handing
+            # `_classify` the indented string shifted every slice by the
+            # indent and filed `[`, `{` and `}` as keywords -- which reached
+            # `morekeywords={[1]{[,{,}}}` and made the .tex uncompilable.
+            _row.colors = _classify(_row.text, _row.colors)
             lst.ids.add(ln.id)
         nums = [n for x in lst.lines
                 for n in (x.blank_before + [x.number] + x.blank_after)
@@ -443,8 +591,66 @@ def accumulate(page) -> list:
         rect = (min(g.rect[0] for g in glyphs), min(g.rect[1] for g in glyphs),
                 max(g.rect[2] for g in glyphs), max(g.rect[3] for g in glyphs))
         lst.background = _fill_under(page, rect)
+        drawn = _encloses(getattr(page, "frames", ()), rect)
+        lst.rect, lst.framed = (drawn, True) if drawn else (rect, False)
+        lst.language, lst.language_source = _language(lst)
         out.append(lst)
     return out
+
+
+#: The coverage below which the words seen do not name a language. A
+#: listing that colours `for` and `float` is covered 100% by Modula-2,
+#: Java and C alike; saying one of them would be inventing evidence.
+_LANG_COVER = 0.75
+
+
+def _language(lst) -> tuple:
+    """(language, source) from the words the page STYLED, or ("", "").
+
+    781e — ASK THE PACKAGE THAT PAINTED THE PAGE.
+
+    `keywordstyle` colours a word if and only if that word is in the
+    keyword list of the language the author named, so the coloured words
+    are a SUBSET of one language's keywords and the language can be looked
+    up rather than guessed. `listings` ships 94 of those lists; `lstlangs`
+    reads them out, the same move `texmap` makes with `mathabx.dcl`.
+
+    Each style group is tried alone -- a page has a keyword colour, a
+    comment colour and a string colour, and only one of them is keywords.
+    Two languages that fit equally well is an abstention: measured over the
+    112 gold listings whose declared language `listings` also defines, this
+    answered 34 and was right 34 times, abstaining on the rest. A reader
+    that is silent when the page is silent is worth more than one that
+    guesses.
+    """
+    table = lstlangs.load()
+    groups: dict = {}
+    for word, rgb, bold, italic in lst.keywords:
+        groups.setdefault((rgb, bold, italic), set()).add(word)
+    best, cover = "", 0.0
+    for words in groups.values():
+        if len(words) < 2:
+            continue
+        r = lstlangs.rank(words, table, top=2)
+        if not r or (len(r) > 1 and abs(r[1][1] - r[0][1]) < 1e-9):
+            continue
+        if r[0][1] > cover:
+            best, cover = r[0][0], r[0][1]
+    return (best, "keywords") if cover >= _LANG_COVER else ("", "")
+
+
+def _encloses(frames, rect):
+    """The smallest drawn frame that contains `rect`, or None.
+
+    Smallest, because a listing inside a table cell sits inside TWO drawn
+    rectangles and the inner one is the listing's.
+    """
+    fit = [f for f in frames
+           if f[0] <= rect[0] + 2 and f[2] >= rect[2] - 2
+           and f[1] <= rect[1] + 2 and f[3] >= rect[3] - 2]
+    if not fit:
+        return None
+    return min(fit, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))
 
 
 def listing_of(page, line):
