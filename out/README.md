@@ -170,6 +170,13 @@ was cropped away as a diagram. `frame=none` and `leftline` worked, which is
 why 291 gold listings from real papers never showed it. 4 of 14 before the
 fix, 14 of 14 after.
 
+It also carries the **cell probe**: two listings in one `tabular` row. 52
+of the 1,025 listings in the library sit in a table cell (5.1%), 43 of the
+291 gold files have a cell provenance — and none of them exercises it,
+because the builder lifted each listing *out* of its cell into a standalone
+document. A gold set built by extraction cannot measure a defect of
+containment.
+
 ### The round trip
 
 A projection that cannot be re-read is not a projection.

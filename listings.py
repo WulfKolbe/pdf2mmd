@@ -119,6 +119,53 @@ class Listing:
     #: What the page says the language is, and on what evidence.
     language: str = ""
     language_source: str = ""    # keywords | declared | detected | ""
+    #: WHERE ON THE PAGE, in the page's own line stream. A listing that
+    #: becomes a file still has to be findable in the document it came
+    #: from, and a rectangle alone cannot say which lines those were.
+    page: int = 0
+    index: int = 0               # 1-based, this listing's place on the page
+    line_start: int = -1         # index into `PageNode.lines`, inclusive
+    line_end: int = -1           # inclusive
+
+    @property
+    def line_count(self) -> int:
+        """Rows the page shows, blank ones included.
+
+        Not `len(self.lines)`: a blank code line leaves no glyph and no
+        ListingLine, only a number in the gutter, and a file written
+        without it has every line after it at the wrong number.
+        """
+        return len(self.rows())
+
+    @property
+    def extension(self) -> str:
+        """The file extension for this listing's language, or `.txt`.
+
+        `.txt` is the abstention, not a default: writing `min.c` for a
+        listing whose language was never established is a claim, and a
+        wrong one renames the file every time the guess changes.
+        """
+        return SUFFIX.get(self.language.lower(), ".txt")
+
+    @property
+    def stem(self) -> str:
+        """`p5-lst3` -- where it is, which is all this object can know."""
+        return "p%d-lst%d" % (self.page or 0, self.index or 0)
+
+    def filename(self, doc_id: str = "") -> str:
+        """The file this listing would be written as.
+
+        The document id is the CALLER'S, because a page does not know what
+        document it is in -- `docmodel_six.build` is given a path and keeps
+        none of it. Passing it in keeps the naming honest rather than
+        inventing an id here.
+        """
+        stem = ("%s-%s" % (_slug(doc_id), self.stem)) if doc_id else self.stem
+        return stem + self.extension
+
+    def path(self, doc_id: str = "", root: str = "listings") -> str:
+        return "%s/%s" % (root.rstrip("/"), self.filename(doc_id)) if root \
+            else self.filename(doc_id)
 
     @property
     def code(self) -> str:
@@ -610,12 +657,22 @@ def _merge_rows(run) -> list:
         if not ln.glyphs:
             continue
         base = statistics.median([g.baseline for g in ln.glyphs])
+        x0 = min(g.rect[0] for g in ln.glyphs)
+        x1 = max(g.rect[2] for g in ln.glyphs)
         for row in rows:
-            if abs(row[2] - base) < 0.5 * pitch:
+            # A SHARED BASELINE IS NOT ENOUGH. Two cells of one table row
+            # share a baseline exactly, so merging on baseline alone put
+            # the neighbouring cell back into this listing and undid the
+            # column split -- page 5 of 1804.10694v5, block 5. What this
+            # pass is for sits INSIDE the row it belongs to (the `*` of
+            # `i0*32+i1`, x 395.7..400.5 inside 316.5..424.4); a cell
+            # beside it lies wholly outside. So containment, not proximity.
+            if (abs(row[2] - base) < 0.5 * pitch
+                    and x0 >= row[3] - 0.5 and x1 <= row[4] + 0.5):
                 row[1].extend(ln.glyphs)
                 break
         else:
-            rows.append([ln, list(ln.glyphs), base])
+            rows.append([ln, list(ln.glyphs), base, x0, x1])
     return [(r[0], sorted(r[1], key=lambda g: g.rect[0])) for r in rows]
 
 
@@ -623,6 +680,7 @@ def accumulate(page) -> list:
     """Every listing on the page, with the properties that would set it."""
     out: list = []
     boxes: list = []
+    where = {ln.id: i for i, ln in enumerate(page.lines)}
     for run in _blocks(page):
         glyphs = [g for ln in run for g in ln.glyphs]
         mono = _mono(glyphs)
@@ -680,6 +738,11 @@ def accumulate(page) -> list:
         rect = (min(g.rect[0] for g in glyphs), min(g.rect[1] for g in glyphs),
                 max(g.rect[2] for g in glyphs), max(g.rect[3] for g in glyphs))
         lst.background = _fill_under(page, rect)
+        seen = [where[ln.id] for ln in run if ln.id in where]
+        lst.page = getattr(page, "page", 0)
+        lst.index = len(out) + 1
+        lst.line_start = min(seen) if seen else -1
+        lst.line_end = max(seen) if seen else -1
         lst.rect = rect
         lst.language, lst.language_source = _language(lst)
         boxes.append(rect)
@@ -692,6 +755,34 @@ def accumulate(page) -> list:
         if drawn:
             lst.rect, lst.framed = drawn, True
     return out
+
+
+#: The conventional file extension for each language `listings` names, for
+#: a listing that is written out as a file. Only the ones whose extension
+#: is not in dispute; anything else gets `.txt`, which says "this is text
+#: we read" rather than making a claim about what it is.
+SUFFIX = {
+    "c": ".c", "c++": ".cpp", "cpp": ".cpp", "java": ".java",
+    "python": ".py", "ruby": ".rb", "perl": ".pl", "php": ".php",
+    "html": ".html", "xml": ".xml", "css": ".css", "json": ".json",
+    "sql": ".sql", "bash": ".sh", "sh": ".sh", "csh": ".csh",
+    "awk": ".awk", "make": ".mk", "lua": ".lua", "r": ".R",
+    "go": ".go", "rust": ".rs", "scala": ".scala", "swift": ".swift",
+    "haskell": ".hs", "erlang": ".erl", "lisp": ".lisp", "ml": ".ml",
+    "caml": ".ml", "prolog": ".pl", "ada": ".adb", "fortran": ".f90",
+    "pascal": ".pas", "delphi": ".pas", "matlab": ".m", "octave": ".m",
+    "tex": ".tex", "verilog": ".v", "vhdl": ".vhd", "assembler": ".asm",
+    "basic": ".bas", "cobol": ".cob", "eiffel": ".e", "julia": ".jl",
+    "vbscript": ".vbs", "postscript": ".ps", "gnuplot": ".gp",
+    "mathematica": ".m", "maple": ".mpl", "elisp": ".el",
+}
+
+_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _slug(name: str) -> str:
+    """A document id safe to put in a filename, and recognisable after."""
+    return _SLUG.sub("-", name.strip()).strip("-.") or "doc"
 
 
 #: The coverage below which the words seen do not name a language. A
