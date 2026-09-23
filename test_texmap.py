@@ -910,3 +910,52 @@ class TestTheMathabxDeclarationFileNamesItsOwnSlots:
         r"""`tex_slot` was verified by rendering each slot at 500dpi, which
         outranks a declaration file."""
         assert texmap.tex_slot("AAAAAA+TeX-matha10", 112) == "parenleft"
+
+
+class TestMonospaceNamesFromTheFontCensus:
+    """781n — measured over 18,685 distinct `/BaseFont` names from the
+    6,101 PDFs of the IUST object corpus (arXiv 1812.09961), which is a
+    font-dictionary census rather than the 102 documents we own.
+
+    The old rule anchored `mono` at the END of a name, so it caught
+    `LiberationMono` and missed `Monospace821BT-Roman` -- 98 occurrences,
+    the commonest typewriter name in that sample.
+    """
+
+    def test_the_names_the_end_anchor_missed(self):
+        for name in ("Monospace821BT-Roman", "Monospace821BT-Italic",
+                     "Gen.Monospac821-BT", "DroidSansMono-Slant_213",
+                     "FiraMono-Regular-Identity-H", "TheSansMonoLF"):
+            assert texmap.is_monospace(name), name
+
+    def test_lmodern_typewriter(self):
+        """What `lmodern` makes \\ttfamily, so any modern LaTeX listing."""
+        for name in ("LMTypewriter10-Regular", "LMTypewriter9-Regular",
+                     "LMTypewriter10-Dark", "UMTypewriter",
+                     "LucidaSans-Typewriter", "P22Typewriter"):
+            assert texmap.is_monospace(name), name
+
+    def test_monotype_is_a_foundry_not_a_pitch(self):
+        """MonotypeCorsiva is a SCRIPT face. 4 names, 5 occurrences in the
+        census -- small, but the exclusion costs nothing and the false
+        positive would be silent."""
+        for name in ("MonotypeCorsiva", "MonotypeCorsiva,Italic",
+                     "AAvaMA+MonotypeCorsiva"):
+            assert not texmap.is_monospace(name), name
+
+    def test_lm_mono_proportional_is_not_fixed_pitch(self):
+        """`LMMonoProp10` says Mono and is proportional."""
+        for name in ("LMMonoProp10-Regular", "LMMonoProp10-Oblique",
+                     "LMMonoPropLt10-Regular"):
+            assert not texmap.is_monospace(name), name
+
+    def test_the_ones_that_already_worked_still_do(self):
+        for name in ("LiberationMono", "DejaVuSansMono", "CMTT10",
+                     "SFTT0800", "Courier-Bold", "NimbusMonL-Regu",
+                     "LMMono10-Regular", "LuxiMono"):
+            assert texmap.is_monospace(name), name
+
+    def test_prose_faces_are_still_refused(self):
+        for name in ("NimbusRomNo9L-Regu", "Times-Roman", "SFRM1000",
+                     "CMR10", "Helvetica", "DejaVuSans"):
+            assert not texmap.is_monospace(name), name

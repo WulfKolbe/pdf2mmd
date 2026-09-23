@@ -198,8 +198,23 @@ _MONO_NAME = re.compile(
     # enough of it: lst-278, 21,928 advances in SFTT0800, 51 letters,
     # advance/size 0.531 on 100.0% of them.
     r"\bsftt\d*|"
-    r"courier|consol|monaco|menlo|inconsolata|nimbusmon|lmmono|"
-    r"mono(space)?\d*$|mono[a-z]*\d*$|-tt\b",
+    r"courier|consol|monaco|menlo|inconsolata|nimbusmon|"
+    # 781n -- MEASURED OVER 18,685 REAL /BaseFont NAMES, from the 6,101
+    # PDFs of the IUST object corpus (arXiv 1812.09961). The old rule
+    # anchored `mono` at the END of the name, which caught
+    # `LiberationMono` and `DejaVuSansMono` and missed
+    # `Monospace821BT-Roman` -- 98 occurrences, the single commonest
+    # typewriter name in that sample -- along with `DroidSansMono-Slant`
+    # and every `LMTypewriter*`, which is what `lmodern` makes \ttfamily.
+    #
+    # Two exclusions, and the corpus sized both: `monotype` is a FOUNDRY
+    # (MonotypeCorsiva, a script face; 4 names, 5 occurrences) and
+    # `monoprop` is Latin Modern Mono PROPORTIONAL, which is not fixed
+    # pitch despite the name. Everything else matching `mono` in that
+    # sample -- 50 distinct names, ~790 occurrences -- is genuinely
+    # monospace: Bera, DejaVu, Droid, Fira, Free, Liberation, Luxi,
+    # Monospac821, PrimaSansMono, TheSansMono and every LMMono.
+    r"mono(?!type|prop)|typewriter|-tt\b",
     re.I,
 )
 
