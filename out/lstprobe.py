@@ -48,6 +48,37 @@ CELL_OPEN = ("c-plain", "c-plain-img", "c-ruled", "c-ruled-img",
 NO_BOX = ("f-none", "f-none-img", "f-leftline", "f-leftline-img")
 
 
+def one_external(page) -> dict:
+    r"""`\lstinputlisting` of a file in a cloned repo, lines 10-25.
+
+    The body is NOT in the .tex, so the gold is the FILE; `firstline=10`
+    means the gutter starts at 10, and the provenance is a PDF ANNOTATION
+    -- the commit-pinned URL is nowhere in the glyph stream.
+    """
+    src = (PROBE / "gh" / "vendor" / "myrepo" / "src" / "example.py")
+    gold = src.read_text(encoding="utf-8").split("\n")[9:25]
+    row = {"id": "g-github", "listings": len(page.listings),
+           "frames": len(page.frames), "diagrams": len(page.diagrams)}
+    if len(page.listings) != 1:
+        row.update(ok=False, why="%d listings, not 1" % len(page.listings))
+        return row
+    lst = page.listings[0]
+    got = [t for _n, t in lst.rows()]
+    nums = [n for n, _t in lst.rows()]
+    if len(got) != len(gold):
+        row.update(ok=False, why="%d rows, not %d" % (len(got), len(gold)))
+        return row
+    for i, (a, b) in enumerate(zip(gold, got)):
+        if a.rstrip() != b.rstrip():
+            row.update(ok=False, why="line %d reads %r" % (10 + i, b[:30]))
+            return row
+    if nums != list(range(10, 26)):
+        row.update(ok=False, why="numbering %s..%s" % (nums[0], nums[-1]))
+        return row
+    row.update(ok=True, why="16/16 text, indent and numbering")
+    return row
+
+
 def one_cell(tex: Path, page) -> dict:
     """A table row holding two listings must come back as two listings."""
     got = sorted(L.code for L in page.listings)
@@ -69,6 +100,12 @@ def one(tex: Path) -> dict:
         shutil.copy2(tex, d)
         for extra in PROBE.glob("*.png"):
             shutil.copy2(extra, d)
+        # The external probe needs its cloned repo and its generated
+        # metadata beside it -- that IS the thing under test.
+        if tex.parent.name == "gh":
+            for extra in ("github-vars.tex",):
+                shutil.copy2(tex.parent / extra, d)
+            shutil.copytree(tex.parent / "vendor", d / "vendor")
         subprocess.run(["pdflatex", "-interaction=nonstopmode", "-no-shell-escape",
                         "-output-directory", str(d), str(d / tex.name)],
                        capture_output=True, text=True, errors="replace", timeout=180)
@@ -80,6 +117,8 @@ def one(tex: Path) -> dict:
         page = dm.build(str(pdf))[0]
         if tex.stem.startswith("c-"):
             return one_cell(tex, page)
+        if tex.stem == "g-github":
+            return one_external(page)
         want_box = tex.stem not in NO_BOX
         row = {"id": tex.stem, "listings": len(page.listings),
                "frames": len(page.frames), "diagrams": len(page.diagrams)}
@@ -106,7 +145,8 @@ def one(tex: Path) -> dict:
 
 
 def main() -> None:
-    files = sorted(PROBE.glob("f-*.tex")) + sorted(PROBE.glob("c-*.tex"))
+    files = (sorted(PROBE.glob("f-*.tex")) + sorted(PROBE.glob("c-*.tex"))
+             + sorted(PROBE.glob("gh/g-*.tex")))
     if not files:
         print("no probe files under %s" % PROBE)
         return

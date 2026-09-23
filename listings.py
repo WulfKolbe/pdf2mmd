@@ -810,11 +810,26 @@ def _continues(ln) -> bool:
     # four blocks of a 28-line listing and e-htmljs lost every line that
     # was a lone brace. The leading small digits are the gutter, and the
     # same test `_gutter` uses drops them.
+    # NOTHING BUT DIGITS is a blank code line, and the size test cannot
+    # say so: with no code on the row it compares the digits against
+    # THEMSELVES -- `4.5 < 0.85 * 4.5` -- and never strips. Decided here,
+    # before the loop that needs a code glyph to measure against.
+    if all(g.text.isdigit() for g in gs):
+        return True
     size = statistics.median([g.size for g in gs])
     while gs and gs[0].text.isdigit() and gs[0].size < 0.85 * max(
             (g.size for g in gs if not g.text.isdigit()), default=size):
         gs = gs[1:]
-    return bool(gs) and all(texmap.is_monospace(g.fontname) for g in gs)
+    if not gs:
+        # NOTHING BUT A NUMBER IS A BLANK CODE LINE, and a blank line does
+        # not end a listing. Two consecutive blanks did: the first is
+        # absorbed as the previous row's `blank_after`, the second had
+        # only its gutter digit left and was refused, so g-github's
+        # 16-line listing came back as two blocks with line 16 missing
+        # entirely. This runs only with a block already open, so it can
+        # never START one from a stray page number.
+        return True
+    return all(texmap.is_monospace(g.fontname) for g in gs)
 
 
 def _columns_of(run, spans) -> list:
@@ -1144,6 +1159,15 @@ def accumulate(page) -> list:
         _merged = _merge_rows(run)
         _code_x = _gutter_column(_merged, cell)
         for ln, gs in _merged:
+            # A ROW THAT IS ONLY ITS NUMBER IS A BLANK CODE LINE, and its
+            # glyphs are the GUTTER, not code. Treating them as code made
+            # the blank line's number the row's text (`|16|`) and, worse,
+            # dragged `left` out to the gutter column -- every indent in
+            # g-github gained seven cells from one blank line.
+            if all(g.text.isdigit() for g in gs if g.text.strip()):
+                rows.append((ln, list(gs), []))
+                numbered += 1
+                continue
             if _code_x is not None:
                 lead = [g for g in gs if g.rect[0] < _code_x - 0.5]
                 code = [g for g in gs if g.rect[0] >= _code_x - 0.5]
@@ -1162,11 +1186,21 @@ def accumulate(page) -> list:
             rows.append((ln, lead, code))
         if not rows:
             continue
-        left = min(c[0].rect[0] for _ln, _lead, c in rows)
+        _coded = [c for _ln, _lead, c in rows if c]
+        if not _coded:
+            continue
+        left = min(c[0].rect[0] for c in _coded)
         lst = Listing(cell=cell, left=left, size=size,
                       font=statistics.mode([g.fontname for g in mono]),
                       numbers=numbered >= 0.8 * len(rows))
         for ln, lead, code in rows:
+            if not code:                      # a numbered blank line
+                before, own, after = _split_gutter(lead, lead, size)
+                lst.lines.append(ListingLine(
+                    id=ln.id, indent=0, text="", number=own,
+                    blank_before=before, blank_after=after))
+                lst.ids.add(ln.id)
+                continue
             text = grid_text(code, cell)
             indent = int(round((code[0].rect[0] - left) / cell))
             before, own, after = _split_gutter(lead, code, size)

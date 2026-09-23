@@ -171,6 +171,13 @@ was cropped away as a diagram. `frame=none` and `leftline` worked, which is
 why 291 gold listings from real papers never showed it. 4 of 14 before the
 fix, 14 of 14 after.
 
+It also carries the **external probe** (`gh/`): a `\lstinputlisting` of a
+file in a cloned git repo, lines 10–25, whose caption is an `\href` to the
+*commit* that contains it. The body is not in the `.tex`, the gutter starts
+at 10, and the provenance is a **PDF annotation** — the commit-pinned URL
+with its `#L10-L25` anchor is nowhere in the glyph stream. 16 of 16 on
+text, indentation and numbering.
+
 It also carries the **cell probe**: two listings in one `tabular` row. 52
 of the 1,025 listings in the library sit in a table cell (5.1%), 43 of the
 291 gold files have a cell provenance — and none of them exercises it,
