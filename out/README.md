@@ -26,6 +26,7 @@ scripts produce.
 | `lstroundtrip.py` | LaTeX → PDF → pdf2mmd → LaTeX → PDF → pdf2mmd: does the projection re-read? |
 | `lstgoldcheck.py` | is the gold set sound — errors, and how much of each page IS the listing |
 | `lstprobe.py` | the frame probe: one body, every frame style, with and without an image |
+| `gridguard.py` | can the monospace grid be seen from LINE geometry alone — measured for MathPix |
 | `lstlang.py` / `langdetect.py` | language guessing, measured against the declared gold |
 
 ## The loop
