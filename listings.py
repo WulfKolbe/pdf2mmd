@@ -972,6 +972,38 @@ def _cell_split(page) -> None:
     `_columns_of` uses for columns, applied to the result. A candidate
     that does not produce two clean columns was not a cell boundary, and
     nothing is changed.
+
+    781j — AND IT REFUSES PAGE 5 OF 1804.10694v5, WHICH IS CORRECT.
+
+    Three lines there are two cells merged, and the split is not taken.
+    Every way of making it acceptable also makes a WRONG boundary on the
+    same page acceptable:
+
+                          split lines   edge spread      gap
+        e-tables  x=421       4          0.00 cells   +51.06 cells
+        page 5    x=314 TRUE  3          0.00 cells    -0.21 cells
+        page 5    x=317 false 20         0.00 cells    -0.69 cells
+        page 5    x=400 false 19         5.00 cells    -0.00 cells
+
+    The true boundary has a NEGATIVE gap -- the left cell's last glyph, a
+    `)`, ends at 315.01 and the right cell begins at 314.0, so the cells
+    physically abut. Nor is that a bearing: measured over this run and 22
+    gold listings the ink box equals the advance exactly (width/cell =
+    1.00). There is no corridor to find.
+
+    Tried and reverted: a cell of slack on the disjointness test (let in
+    x=317, which cuts the right column's own text -- 5 blocks became 9
+    and `Parallel for(i0` was truncated mid-token); scoring candidates by
+    smallest overshoot (let in x=400, inside two runs that are one
+    listing each); counting glyphs that cross (1 glyph, 0.17%, for the
+    true AND the false candidate); requiring the right pieces to share a
+    left edge (0.00 cells for the true boundary and for two false ones).
+
+    A split that is right on one page and wrong on the same page is not a
+    rule. What would settle it is the tabular's own column boundary,
+    which reaches the PDF only if the author drew a rule there -- and on
+    this page they did not. The cost is 3 lines of one block; the other
+    four listings on that page are read exactly.
     """
     from docmodel_six import LineNode
 
