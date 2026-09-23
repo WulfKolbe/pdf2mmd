@@ -635,6 +635,63 @@ def _split_gutter(lead, code, size: float):
             [x for x in after if x is not None])
 
 
+def _gutter_column(rows, cell: float):
+    r"""The x at which the CODE starts, when a line-number column exists.
+
+    781l — A GUTTER THE SIZE TEST CANNOT SEE.
+
+    `_gutter` recognises the line-number column by its type size, because
+    `numberstyle` is `\tiny` by convention. An author who sets
+    `numbers=left` and leaves `numberstyle` alone gets numbers at the
+    CODE'S OWN SIZE, and the size test is blind to them. 2310.02304v3 does
+    exactly that, and its listings came back with the number inside the
+    code --
+
+        '1  import concurrent.futures'
+
+    -- which put every line one space further right than it is. Measured
+    over the gold set, that single cause accounted for 719 of the 1166
+    wrong indents: 4 read as 5, 8 as 9, 0 as 1.
+
+    What the size cannot say, the COLUMN can. A gutter is a leading run of
+    digits at one x on every row, whose numbers increase, followed by the
+    code at one x on every row. Nothing else on a page does all three.
+    Returns that code x, or None.
+    """
+    left, right, code, nums = [], [], [], []
+    for _ln, gs in rows:
+        gs = [g for g in gs if g.text.strip()]
+        i = 0
+        while i < len(gs) and gs[i].text.isdigit():
+            i += 1
+        if not i or i >= len(gs):
+            continue
+        left.append(gs[0].rect[0])
+        right.append(gs[i - 1].rect[2])
+        code.append(gs[i].rect[0])
+        nums.append(int("".join(g.text for g in gs[:i])))
+    if len(nums) < max(3, 0.7 * len(rows)):
+        return None
+    if any(b <= a for a, b in zip(nums, nums[1:])):
+        return None
+    tol = 0.5 * cell
+    # NEITHER EDGE IS CONSTANT IN GENERAL. `numbers=left` RIGHT-aligns the
+    # column, so the gutter's left edge moves with the number's width
+    # (` 6`, ` 9`, `10`); and the CODE's left edge moves with the
+    # indentation, which is the whole thing being measured. What holds is
+    # that one side of the digit run is flush: right-aligned numbers end
+    # at one x, left-aligned ones begin at one x. Requiring the wrong one
+    # refused every listing past line nine.
+    flush = (max(right) - min(right) <= tol) or (max(left) - min(left) <= tol)
+    if not flush:
+        return None
+    # And the code is SEPARATED from it -- a number that is simply the
+    # first token of the line is not a gutter.
+    if min(code) - max(right) < 0.5 * cell:
+        return None
+    return max(right) + 0.5 * cell
+
+
 def _number(lead) -> int | None:
     t = "".join(g.text for g in lead).strip()
     return int(t) if t.isdigit() else None
@@ -1084,8 +1141,16 @@ def accumulate(page) -> list:
             continue
         rows: list = []
         numbered = 0
-        for ln, gs in _merge_rows(run):
-            lead, code = _gutter(gs, size)
+        _merged = _merge_rows(run)
+        _code_x = _gutter_column(_merged, cell)
+        for ln, gs in _merged:
+            if _code_x is not None:
+                lead = [g for g in gs if g.rect[0] < _code_x - 0.5]
+                code = [g for g in gs if g.rect[0] >= _code_x - 0.5]
+                if not code:
+                    lead, code = [], list(gs)
+            else:
+                lead, code = _gutter(gs, size)
             if lead:
                 numbered += 1
             while code and not code[0].text.strip():

@@ -261,6 +261,60 @@ class TestTheFrame:
         assert L.frames(rules, span_pt=8.0) == []
 
 
+class TestAGutterTheSizeTestCannotSee:
+    r"""`numberstyle` is `\tiny` by convention, so `_gutter` knows the
+    line-number column by its SIZE. An author who sets `numbers=left` and
+    leaves `numberstyle` alone gets numbers at the code's own size.
+    2310.02304v3 does exactly that."""
+
+    def _block(self, numbers, indents):
+        """A listing whose gutter is the same size as its code."""
+        rows = []
+        for i, (num, ind) in enumerate(zip(numbers, indents)):
+            y = 300.0 - 10 * i
+            ln = row("for (i in 0..N)", 56.69 + ind * CELL, y=y)
+            # RIGHT-ALIGNED, as `numbers=left` sets it: the digits end at
+            # one x and begin at different ones.
+            text = str(num)
+            x = 48.32 - (len(text) - 1) * CELL
+            for j, ch in enumerate(text):
+                ln.glyphs.insert(j, g(ch, x + j * CELL, size=8.0, y=y))
+            rows.append(ln)
+        return _page(rows).listings[0]
+
+    def test_a_same_size_gutter_is_still_a_gutter(self):
+        lst = self._block([1, 2, 3, 4], [0, 0, 0, 0])
+        assert lst.numbers
+        assert [x.number for x in lst.lines] == [1, 2, 3, 4]
+        assert lst.lines[0].text == "for (i in 0..N)"
+
+    def test_two_digit_numbers_do_not_refuse_it(self):
+        """The first fix required the gutter's LEFT edge to be constant.
+        Right-aligned numbers move it -- ` 9`, `10` -- so every listing
+        past line nine was refused, and the measurement went DOWN."""
+        lst = self._block([8, 9, 10, 11], [0, 0, 0, 0])
+        assert lst.numbers
+        assert [x.number for x in lst.lines] == [8, 9, 10, 11]
+
+    def test_indentation_does_not_refuse_it(self):
+        """The second fix required the CODE's left edge to be constant.
+        That moves with the indentation, which is the thing being
+        measured."""
+        lst = self._block([6, 7, 8, 9], [0, 4, 4, 8])
+        assert lst.numbers
+        assert [x.indent for x in lst.lines] == [0, 4, 4, 8]
+
+    def test_a_leading_number_that_is_code_is_not_a_gutter(self):
+        """`1 + 1` is not a line number: nothing separates it from the
+        code, and the numbers do not increase."""
+        rows = [row("1 + count(alpha) == total", 56.69, y=300.0),
+                row("1 + count(beta) == total", 56.69, y=290.0),
+                row("1 + count(gamma) == total", 56.69, y=280.0)]
+        lst = _page(rows).listings[0]
+        assert not lst.numbers
+        assert lst.lines[0].text.startswith("1 +")
+
+
 class TestTheHeader:
     """The header/body split: everything ABOUT the listing on the outside,
     and one plain-text program on the inside."""

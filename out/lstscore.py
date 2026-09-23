@@ -18,10 +18,19 @@ ways that are the page's doing rather than the reader's:
                  listings their exact score the day the reader started
                  emitting it -- a measurement that moved because the
                  SCORER had not been told.
+  COMMON INDENT  59 of the 291 gold bodies are indented as a whole inside
+                 the author's source -- every line begins with the same 2,
+                 4 or 5 spaces. The page cannot show that as an indent: it
+                 becomes the block's LEFT EDGE, and a reader measuring
+                 indent against that edge reads 0 for every line and is
+                 right to. Indentation is RELATIVE structure, so both
+                 sides are dedented before it is compared. 5 listings were
+                 scoring 0 of 28, 0 of 22, 0 of 25 on this alone.
 
 INDENTATION IS NOT IN THAT LIST. Leading whitespace is content -- in Python
 it is the block structure -- so it is compared, and reported separately so a
-loss cannot hide inside a high score.
+loss cannot hide inside a high score. What IS dedented first is the indent
+the whole block shares, which is the page's left margin, not structure.
 
     python3 lstscore.py            # the whole set
     python3 lstscore.py --limit 20
@@ -78,6 +87,14 @@ def rows(text: str) -> list:
     return [x for x in text.split("\n") if x.strip()]
 
 
+def dedent(lines: list) -> list:
+    """Drop the indent every line shares -- it is a margin, not structure."""
+    if not lines:
+        return lines
+    common = min(len(x) - len(x.lstrip()) for x in lines)
+    return [x[common:] for x in lines] if common else lines
+
+
 def read_back(tex_path: Path, keep: Path | None = None) -> "list | None":
     """Compile the gold file and read the PDF with pdf2mmd."""
     d = Path(tempfile.mkdtemp(prefix="lst-", dir="/tmp/claude-1000"))
@@ -117,12 +134,22 @@ def score(tex_path: Path) -> dict:
     got = strip_numbers(got, tex)
     flat_w = [x.strip() for x in want]
     flat_g = [x.strip() for x in got]
-    ratio = difflib.SequenceMatcher(None, flat_w, flat_g).ratio()
-    # indentation, compared only on the lines that matched
-    ind_w = [len(x) - len(x.lstrip()) for x in want]
-    ind_g = [len(x) - len(x.lstrip()) for x in got]
-    n = min(len(ind_w), len(ind_g))
-    kept = sum(1 for i in range(n) if ind_w[i] == ind_g[i])
+    sm = difflib.SequenceMatcher(None, flat_w, flat_g)
+    ratio = sm.ratio()
+    # Indentation, compared only on the lines that MATCHED -- which is what
+    # this comment has always said and what the code did not do. It zipped
+    # the two lists positionally, so one `breaklines=true` wrap threw every
+    # later line against the wrong gold line and the rest of the listing
+    # scored at chance. lst-278 lost 59 indents that way and lst-203 47,
+    # neither of them a reading error: the page shows the wrapped form and
+    # the gold holds the source line, exactly as WRAPPING above says.
+    ind_w = [len(x) - len(x.lstrip()) for x in dedent(want)]
+    ind_g = [len(x) - len(x.lstrip()) for x in dedent(got)]
+    pairs = [(i + k, j + k)
+             for tag, i, i2, j, _j2 in sm.get_opcodes() if tag == "equal"
+             for k in range(i2 - i)]
+    n = len(pairs)
+    kept = sum(1 for i, j in pairs if ind_w[i] == ind_g[j])
     return {"id": tex_path.stem, "state": "read", "gold": len(want),
             "read": len(got), "text": ratio,
             "indent": (kept / n) if n else 0.0,
