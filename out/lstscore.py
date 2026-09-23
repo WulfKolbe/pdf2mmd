@@ -13,6 +13,11 @@ ways that are the page's doing rather than the reader's:
                  It is in the gold and cannot be in any reading.
   WRAPPING       `breaklines=true` wraps a long line, and the page shows the
                  wrapped form. A reader of the PAGE must reproduce that.
+  FENCE INFO     ```` ```python ```` names the language on the fence, which
+                 is markdown, not a line of code. Counting it cost 15
+                 listings their exact score the day the reader started
+                 emitting it -- a measurement that moved because the
+                 SCORER had not been told.
 
 INDENTATION IS NOT IN THAT LIST. Leading whitespace is content -- in Python
 it is the block structure -- so it is compared, and reported separately so a
@@ -93,7 +98,7 @@ def read_back(tex_path: Path, keep: Path | None = None) -> "list | None":
             return None
         t = md[0].read_text(encoding="utf-8", errors="replace")
         out = []
-        for b in re.findall(r"```(.*?)```", t, re.S):
+        for b in re.findall(r"```[^\n]*\n(.*?)```", t, re.S):
             out += rows(b)
         return out
     except Exception:                                      # noqa: BLE001

@@ -1553,7 +1553,20 @@ def to_markdown(pages: list[PageNode], doc_id: str = "pdfdrill",
                     continue
                 if not fence_open:
                     out.append("")
-                    out.append("```")
+                    # 781i — EVERYTHING MEASURED, AT THE HEAD OF THE BLOCK.
+                    #
+                    # In an HTML comment, because markdown has no comment
+                    # of its own and a renderer must not print this. It is
+                    # the same text the .tex carries behind `%`, so the two
+                    # projections cannot drift apart.
+                    if _lst is not None:
+                        out.append("<!--")
+                        out += [x.replace("--", "&#45;&#45;")
+                                for x in listings.describe(_lst, doc_id)]
+                        out.append("-->")
+                        out.append("")
+                    out.append("```" + (_lst.language if _lst is not None
+                                        else ""))
                     fence_open = True
                     fence_size = max(
                         (g.size for ln in group for g in ln.glyphs
@@ -1928,7 +1941,7 @@ def _style(rgb, bold: bool, italic: bool, name: str) -> str:
     return "".join(out)
 
 
-def _listing_tex(lst) -> str:
+def _listing_tex(lst, doc_id: str = "") -> str:
     r"""A measured listing, written as the `lstlisting` that would set it.
 
     781 — THE LaTeX PROJECTION OF A LISTING HAD NO LISTING IN IT.
@@ -2007,10 +2020,11 @@ def _listing_tex(lst) -> str:
         opts.append(_opt(key, "{%s}" % _style(rgb, bold, italic, name)))
     if lst.background:
         opts.append(r"backgroundcolor=\color{%s}" % colour(lst.background))
-    return "\n".join(decls
-                     + [r"\begin{lstlisting}[" + ",".join(opts) + "]"]
-                     + [t for _n, t in lst.rows()]
-                     + [r"\end{lstlisting}"])
+    note = ["%% " + x for x in listings.describe(lst, doc_id)]
+    return "\n".join(note + decls
+                      + [r"\begin{lstlisting}[" + ",".join(opts) + "]"]
+                      + [t for _n, t in lst.rows()]
+                      + [r"\end{lstlisting}"])
 
 
 def _flush_eq(out: list, rows: list) -> None:
@@ -2063,7 +2077,7 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
                     _done.add(id(_lst))
                     _flush_eq(out, pending)
                     pending = []
-                    out.append(_listing_tex(_lst))
+                    out.append(_listing_tex(_lst, doc_id))
                 continue
             lvl = heading_level(ln, fp)
             parts: list[str] = []

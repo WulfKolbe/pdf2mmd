@@ -193,7 +193,8 @@ class TestTheLatexProjection:
 
     def test_nothing_is_written_into_the_body(self):
         tex = M._listing_tex(self._lst())
-        body = tex.split("]\n", 1)[1].rsplit("\\end", 1)[0]
+        body = tex.split(r"\begin{lstlisting}[", 1)[1]
+        body = body.split("]\n", 1)[1].rsplit("\\end", 1)[0]
         assert body.startswith("for (i in 0..N)\n  b1[j] = a*f1[i,j]")
         for mark in ("!<", ">!", "moredelim", "textcolor"):
             assert mark not in body
@@ -300,17 +301,30 @@ class TestTheHeader:
         lst.lines[0].text = "[ (i in 0..N)"
         lst.lines[0].colors[0].start, lst.lines[0].colors[0].end = 0, 1
         tex = M._listing_tex(lst)
-        assert "morekeywords" not in tex
+        env = [l for l in tex.split("\n")
+               if l.startswith(r"\begin{lstlisting}")][0]
+        assert "morekeywords" not in env
 
-    def test_a_run_of_keywords_is_not_a_comment(self):
-        """`public static void` opens with no comment marker, so it stays
-        three keywords even though it is one colour reaching no line end."""
-        ln = row("public static void main", 56.69, y=300.0)
+    def test_a_run_of_keywords_is_not_a_literal(self):
+        """`public static void` is three keywords in one style, and stays
+        three: `listings` declares all three for Java, which is the test.
+        (`main` is deliberately not here -- it is not a keyword in any
+        list listings ships, so listings would never have coloured it.)"""
+        ln = row("public static void", 56.69, y=300.0)
         for gl in ln.glyphs:
             gl.color = (1.0, 0.4, 0.0)
         lst = _page([ln, row("b1[j] = 1", 56.69, y=290.0)]).listings[0]
-        assert [w for w, *_ in lst.keywords] == ["public", "static", "void",
-                                                 "main"]
+        assert [w for w, *_ in lst.keywords] == ["public", "static", "void"]
+
+    def test_english_in_one_style_is_not_keywords(self):
+        """lst-121 filed `You will be evaluated based on this score` as
+        eight keywords, out of one prompt string. No single language
+        declares those words, so they are not keywords."""
+        ln = row("You will be evaluated based on this", 56.69, y=300.0)
+        for gl in ln.glyphs:
+            gl.color = (0.58, 0.0, 0.82)
+        lst = _page([ln, row("b1[j] = 1", 56.69, y=290.0)]).listings[0]
+        assert lst.keywords == []
 
     def test_the_rectangle_is_the_glyphs_when_nothing_is_drawn(self):
         lst = self._lst()

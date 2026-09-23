@@ -31,7 +31,7 @@ def read(pdf: Path, out: Path):
     fences = []
     if md:
         t = md[0].read_text(encoding="utf-8", errors="replace")
-        for b in re.findall(r"```(.*?)```", t, re.S):
+        for b in re.findall(r"```[^\n]*\n(.*?)```", t, re.S):
             fences += [x for x in b.split("\n") if x.strip()]
     return fences, (tex[0] if tex else None)
 
