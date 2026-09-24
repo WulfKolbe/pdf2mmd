@@ -4,7 +4,7 @@ The instrument exists because COUNTING MISLEADS: `pdftc_900k_1018.pdf`
 carries 10,368 monospace glyphs and 170 rows of listing, so a count of
 glyphs calls it code and a count of rows calls it prose.
 """
-import profile as pr
+import pageprofile as pr
 from docmodel_six import FillNode, GlyphNode, LineNode, PageNode
 from texmap import project
 

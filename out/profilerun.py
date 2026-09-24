@@ -35,7 +35,7 @@ def one(path: str) -> dict:
     row = {"file": os.path.basename(path)}
     try:
         import docmodel_six as dm
-        import profile as pr
+        import pageprofile as pr
         pages = dm.build(path)
         row["pages"] = len(pages)
         where = pr.document_profile(pages)

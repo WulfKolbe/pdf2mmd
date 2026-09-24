@@ -1137,6 +1137,29 @@ def _cell_split(page) -> None:
             break
 
 
+#: A glyph pdfminer could not map arrives as the literal `(cid:123)`. A
+#: block mostly made of those is not a listing whose text we read badly --
+#: it is a FONT WE CANNOT READ, and every property derived from it is
+#: derived from nothing.
+_CID = re.compile(r"\(cid:\d+\)")
+
+#: Above this share of placeholder characters the block is refused.
+#: Measured on the Wolfram-Language book, whose code cells come back as
+#: `(cid:7)(cid:8)(cid:9)...(cid:9)l(cid:20)(cid:13)i(cid:2)(cid:17)s`:
+#: the four letters that resolved were filed as four single-letter
+#: keywords, and each fragment got a full descriptive header, so 26% of
+#: that document's markdown was a comment about text nobody can read.
+CID_REFUSE = 0.30
+
+
+def _unreadable(text: str) -> bool:
+    """True when the block is mostly glyphs no encoding could resolve."""
+    if not text:
+        return False
+    placeholder = sum(len(m.group(0)) for m in _CID.finditer(text))
+    return placeholder > CID_REFUSE * len(text)
+
+
 def accumulate(page) -> list:
     """Every listing on the page, with the properties that would set it."""
     _cell_split(page)
@@ -1229,6 +1252,10 @@ def accumulate(page) -> list:
             lst.stepnumber = min(steps) if steps else 1
         rect = (min(g.rect[0] for g in glyphs), min(g.rect[1] for g in glyphs),
                 max(g.rect[2] for g in glyphs), max(g.rect[3] for g in glyphs))
+        if _unreadable(lst.text()):
+            # Refused, not repaired: a reader that cannot name the glyphs
+            # cannot name the language, the keywords or the indent either.
+            continue
         lst.background = _fill_under(page, rect)
         seen = [where[ln.id] for ln in run if ln.id in where]
         lst.page = getattr(page, "page", 0)

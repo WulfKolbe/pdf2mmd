@@ -1,4 +1,4 @@
-r"""profile — WHAT IS ON THIS PAGE, and on what evidence. Not how much.
+r"""pageprofile — WHAT IS ON THIS PAGE, and on what evidence. Not how much.
 
 781o — COUNTING MAKES NO SENSE, AND A 132-PAGE MANUAL SHOWS WHY.
 
@@ -31,6 +31,16 @@ TWO RULES, both learned elsewhere in this reader.
 
 Everything here is computed from the glyph and rule model that `build()`
 already produced. No rasterising, no key, no network.
+
+NAMED `pageprofile` AND NOT `profile`: this folder is flat and every module
+imports by bare name, so a file called `profile.py` SHADOWS THE STANDARD
+LIBRARY'S. It did, for about an hour, and the symptom was `cProfile`
+refusing to import at all --
+
+    AttributeError: module 'profile' has no attribute 'run'
+
+-- which means nobody could profile this reader while the module that
+profiles PAGES was sitting in the path.
 """
 from __future__ import annotations
 
@@ -127,6 +137,15 @@ def page_profile(page) -> PageProfile:
         f["inline-math"] = "%d prose line(s) carrying maths" % inline
     if any(ln.rotated for ln in page.lines):
         f["rotated-text"] = "sideways glyphs present"
+    # 781p — THE FONT WE CANNOT READ. pdfminer hands back `(cid:123)` for a
+    # glyph no encoding resolves, and a page of those produces text, lines
+    # and even listings that are all describing nothing.
+    import re as _re
+    txt = "".join(g.text for g in glyphs)
+    ph = sum(len(m.group(0)) for m in _re.finditer(r"\(cid:\d+\)", txt))
+    if txt and ph > 0.30 * len(txt):
+        f["unmapped-glyphs"] = ("%d%% of the text is (cid:N) — the font's "
+                                "encoding is unreadable" % (100 * ph // len(txt)))
     return out
 
 
