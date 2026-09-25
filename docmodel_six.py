@@ -3727,7 +3727,7 @@ def to_lines_json(pages: list[PageNode],
     def _line_type(p, i, ln) -> tuple:
         return _types.get((p.page, i)) or (ln.type, {})
 
-    return {
+    out = {
         "pages": [
             {
                 # MathPix's own page keys first, so a consumer written
@@ -3804,6 +3804,78 @@ def to_lines_json(pages: list[PageNode],
             for p in pages
         ]
     }
+    _add_column_containers(out, pages, k)
+    return out
+
+
+def _add_column_containers(out: dict, pages: list["PageNode"], k: float) -> None:
+    """Give the flat line list the one level of nesting it was missing.
+
+    MathPix nests almost everything one step under a `column`: 528 of 1269
+    lines on 1909.00741 are `column -> text`. That nesting is not decoration —
+    it is the reading order of a two-column paper, stated rather than left for
+    each consumer to guess from x-coordinates. We emitted 0 `parent_id` and 0
+    `children_ids` against their 1244 and 121, so every reader downstream had
+    to rediscover the columns or get the order wrong.
+
+    A container is a REAL measurement, not a label: its rectangle is the union
+    of the lines it holds, so a reader can draw it and check it. It carries no
+    text and `conversion_output: False`, which is exactly how MathPix ships one
+    — a consumer that walks lines for prose skips it without being taught to.
+
+    Only ONE level, and only columns. list_item -> text and table -> cell are
+    the next two MathPix has; neither is measured here yet, and a container
+    invented without a measurement behind it is a structure the document does
+    not have.
+    """
+    from project_mmd import column_membership
+    for page_rec, p in zip(out["pages"], pages):
+        try:
+            member = column_membership(p)
+        except Exception:                                # noqa: BLE001
+            continue
+        if not member:
+            continue
+        recs = page_rec["lines"]
+        by_col: dict = {}
+        for i, col in member.items():
+            if 0 <= i < len(recs):
+                by_col.setdefault(col, []).append(i)
+        containers = []
+        for col in sorted(by_col):
+            idxs = by_col[col]
+            rects = [p.lines[i].rect for i in idxs if p.lines[i].glyphs]
+            if not rects:
+                continue
+            x0 = min(r[0] for r in rects); y0 = min(r[1] for r in rects)
+            x1 = max(r[2] for r in rects); y1 = max(r[3] for r in rects)
+            cid = f"{page_rec.get('image_id') or p.page}-col{col}"
+            for i in idxs:
+                recs[i]["parent_id"] = cid
+            containers.append({
+                "id": cid,
+                "type": "column",
+                "column": col,
+                "line": 0,
+                "font_size": 0,
+                "is_printed": True,
+                "is_handwritten": False,
+                "conversion_output": False,
+                "confidence": 1.0,
+                "confidence_rate": 1.0,
+                "cnt": _contour((x0, y0, x1, y1), p, k),
+                "region": {
+                    "top_left_x": round(x0 * k),
+                    "top_left_y": round((p.rect[3] - y1) * k),
+                    "width": max(1, round((x1 - x0) * k)),
+                    "height": max(1, round((y1 - y0) * k)),
+                },
+                "text": "",
+                "children_ids": [recs[i]["id"] for i in idxs],
+            })
+        # Containers FIRST, as MathPix orders them: a reader building a tree in
+        # one pass meets the parent before the children it names.
+        page_rec["lines"] = containers + recs
 
 
 # ----------------------------------------------------------------------- U7

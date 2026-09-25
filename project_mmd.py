@@ -2377,6 +2377,37 @@ def classify_lines(pages: list[PageNode]) -> dict:
     return out
 
 
+def column_membership(page: PageNode) -> dict:
+    """{line index: column number} for every line with glyphs on this page.
+
+    The CONTAINER MathPix makes a root and we had nothing for. Its export nests
+    almost everything one level down from a `column` — 528 of 1269 lines on
+    1909.00741 are `column -> text` — and that nesting is not decoration: it is
+    the reading order of a two-column paper, stated rather than guessed by
+    whoever consumes the flat list.
+
+    Membership is decided by the line's own x-range against the column bounds
+    `columns()` already measures, by OVERLAP rather than by midpoint: a wide
+    line (a title, a full-width caption) straddles both columns and belongs to
+    the one it covers most, which is the answer a reader would give.
+    """
+    cols = columns(page)
+    if not cols:
+        return {}
+    out: dict = {}
+    for i, ln in enumerate(page.lines):
+        if not ln.glyphs:
+            continue
+        x0, x1 = ln.rect[0], ln.rect[2]
+        best, best_ov = 0, -1.0
+        for k, (cl, cr) in enumerate(cols):
+            ov = min(x1, cr) - max(x0, cl)
+            if ov > best_ov:
+                best, best_ov = k, ov
+        out[i] = best
+    return out
+
+
 def font_report(pages: list[PageNode]) -> str:
     """Document the type sizes and fonts, and what was inferred from them.
 

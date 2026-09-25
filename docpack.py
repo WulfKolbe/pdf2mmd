@@ -79,6 +79,15 @@ def to_docmodel(pages: list["docmodel.PageNode"],
         pno = page["page"]
         per_page[pno] = []
         for idx, line in enumerate(page["lines"]):
+            # A CONTAINER IS NOT CONTENT. `to_lines_json` emits one `column`
+            # record per text column, holding the lines rather than saying
+            # anything itself. Anchoring it makes it an object, and pdfdrill's
+            # SidenoteProcessor claims any `column` with text children — which
+            # is how the two text columns of a paper became 18 "Sidenote"
+            # objects whose bodies are ordinary prose. The nesting belongs in
+            # parent_id/children_ids, which every content line already carries.
+            if line.get("type") == "column":
+                continue
             record = dict(line)
             record["_page"] = pno
             record["_line_index"] = idx

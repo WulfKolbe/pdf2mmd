@@ -43,6 +43,13 @@ def page(lines, w=595.0, h=842.0):
     return PageNode(page=1, rect=(0.0, 0.0, w, h), lines=lines)
 
 
+def content(recs):
+    """The emitted records that are LINES, not containers. `to_lines_json`
+    now puts the column containers first, so a test that means "the first
+    line" has to say so."""
+    return [r for r in recs if r["type"] != "column"]
+
+
 class TestTheFallback:
     def test_a_formula_line_keeps_its_verdict(self):
         """THE REGRESSION THIS EXISTS FOR. The glyph-family count asks whether
@@ -77,14 +84,14 @@ class TestTheEmitter:
     def test_the_type_reaches_the_lines_json(self):
         p = page([line("x plus y", kind="formula")])
         out = docmodel.to_lines_json([p])
-        assert out["pages"][0]["lines"][0]["type"] == "math"
+        assert content(out["pages"][0]["lines"])[0]["type"] == "math"
 
     def test_every_line_still_carries_a_rectangle(self):
         """The geometry is the half that was always right. A classifier that
         costs it is a regression however good its types are."""
         p = page([line("We propose a method that learns a metric"),
                   line("x plus y", y=680.0, kind="formula")])
-        lines = docmodel.to_lines_json([p])["pages"][0]["lines"]
+        lines = content(docmodel.to_lines_json([p])["pages"][0]["lines"])
         assert len(lines) == 2
         for ln in lines:
             r = ln["region"]
@@ -97,6 +104,67 @@ class TestTheEmitter:
         monkeypatch.setattr(mmd, "classify_lines",
                             lambda pages: (_ for _ in ()).throw(RuntimeError("boom")))
         p = page([line("x plus y", kind="formula")])
-        out = docmodel.to_lines_json([p])["pages"][0]["lines"][0]
+        out = content(docmodel.to_lines_json([p])["pages"][0]["lines"])[0]
         assert out["type"] == "formula"          # the node's own verdict
         assert out["region"]["width"] > 0
+
+
+class TestContainment:
+    """The one level of nesting MathPix has and we had none of: 1244 lines
+    with a `parent_id` against our 0. It is not decoration — it is the reading
+    order of a two-column paper, stated rather than left for each consumer to
+    rediscover from x-coordinates."""
+
+    def _two_columns(self):
+        # Every threshold in `columns()` is corpus-measured and this fixture
+        # has to clear all of them: FIVE lines before a cluster of line-starts
+        # is a column at all (a stray equation number at the right margin is
+        # three), and then EIGHT before it is a real share of the page
+        # (wzlxjtu-009 put 4 lines in its supposed second column against 29 in
+        # the first, and reading that page as two-column cost 3 equations).
+        # …and each column must be at least a fifth of the page WIDE, because
+        # a run of equation numbers at the right margin clusters like a column
+        # and is 15pt across. So the fixture needs real line lengths, not
+        # labels.
+        body = "running text of a real column that is wide enough to be one"
+        left = [line(f"{body} left {i}", x0=54.0, y=700.0 - 12 * i)
+                for i in range(10)]
+        right = [line(f"{body} right {i}", x0=331.0, y=700.0 - 12 * i)
+                 for i in range(10)]
+        return page(left + right)
+
+    def test_a_column_container_is_emitted_with_its_children(self):
+        p = self._two_columns()
+        recs = docmodel.to_lines_json([p])["pages"][0]["lines"]
+        cols = [r for r in recs if r["type"] == "column"]
+        assert len(cols) == 2, [r["type"] for r in recs]
+        assert sum(len(c["children_ids"]) for c in cols) == 20
+
+    def test_every_content_line_names_a_parent_that_exists(self):
+        """A dangling parent is worse than a flat list: a reader building a
+        tree in one pass silently drops the child."""
+        p = self._two_columns()
+        recs = docmodel.to_lines_json([p])["pages"][0]["lines"]
+        ids = {r["id"] for r in recs}
+        content = [r for r in recs if r["type"] != "column"]
+        assert content and all(r.get("parent_id") in ids for r in content)
+
+    def test_the_container_carries_a_real_rectangle(self):
+        """A container is a MEASUREMENT, not a label — the union of the lines
+        it holds, so a reader can draw it and check it against the page."""
+        p = self._two_columns()
+        recs = docmodel.to_lines_json([p])["pages"][0]["lines"]
+        for c in (r for r in recs if r["type"] == "column"):
+            assert c["region"]["width"] > 0 and c["region"]["height"] > 0
+            assert c["text"] == "" and c["conversion_output"] is False
+
+    def test_the_parent_comes_before_its_children(self):
+        """MathPix orders them this way and a one-pass tree builder needs it:
+        meet the parent before the children it names."""
+        p = self._two_columns()
+        recs = docmodel.to_lines_json([p])["pages"][0]["lines"]
+        first_content = next(i for i, r in enumerate(recs) if r["type"] != "column")
+        assert all(r["type"] == "column" for r in recs[:first_content])
+
+    def test_a_page_with_no_lines_gets_no_container(self):
+        assert docmodel.to_lines_json([page([])])["pages"][0]["lines"] == []
