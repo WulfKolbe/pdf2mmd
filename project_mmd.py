@@ -2298,7 +2298,7 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
 #: not listed here is one nothing measures yet; inventing it would produce a
 #: Section the document does not contain, and every projection would carry it.
 LINE_TYPES = ("text", "math", "equation", "equation_number", "section_header",
-              "code", "diagram")
+              "code", "diagram", "page_info", "title")
 
 
 def _listing_rows(page: PageNode) -> dict:
@@ -2319,6 +2319,104 @@ def _listing_rows(page: PageNode) -> dict:
     return rows
 
 
+def _running_lines(pages: list[PageNode]) -> set:
+    """{(page number, line index)} for every running header, footer or folio.
+
+    `page_info` in MathPix's vocabulary. On 1107.2723 the line
+    `Signal & Image Processing : An International Journal (SIPIJ) Vol.2, No.2,
+    June 2011` stands at the top of all 16 pages and became 16 Paragraphs,
+    because nothing typed it and `text` becomes prose.
+
+    TWO PROPERTIES, BOTH CHECKABLE WITHOUT READING THE WORDS: the line sits in
+    the top or bottom margin band, and its text REPEATS across pages once the
+    digits are removed — a folio changes on every page, the rest of the header
+    does not. Neither alone is enough: a section heading can open a page, and a
+    repeated word can appear mid-column.
+
+    Below three pages this abstains. A line appearing on both pages of a
+    two-page document is as likely to be a coincidence as a header, and the
+    cost of being wrong is a paragraph deleted from the document.
+    """
+    if len(pages) < 3:
+        return set()
+    BAND = 0.15                       # of page height, top and bottom
+    seen: dict = {}
+    band_lines: list = []
+    for p in pages:
+        h = p.rect[3] - p.rect[1]
+        if h <= 0:
+            continue
+        top_cut, bot_cut = p.rect[3] - BAND * h, p.rect[1] + BAND * h
+        for i, ln in enumerate(p.lines):
+            if not ln.glyphs:
+                continue
+            if not (ln.rect[3] >= top_cut or ln.rect[1] <= bot_cut):
+                continue
+            raw = docmodel._run_text(ln.glyphs).strip()
+            # A bare folio normalises to nothing; it IS page_info, and the
+            # repeat test cannot see it because every page differs.
+            if raw and re.fullmatch(r"[\d\s.,:/–—-]+|[ivxlcdmIVXLCDM.\s]+", raw):
+                band_lines.append(((p.page, i), None))
+                continue
+            key = re.sub(r"[^a-zäöüß]+", "", raw.lower())
+            if len(key) < 6:
+                continue              # too short to be evidence of anything
+            seen.setdefault(key, set()).add(p.page)
+            band_lines.append(((p.page, i), key))
+    need = max(3, int(0.6 * len(pages)))
+    out = set()
+    for where, key in band_lines:
+        if key is None or len(seen.get(key, ())) >= need:
+            out.add(where)
+    return out
+
+
+def _title_lines(pages: list[PageNode]) -> set:
+    """{(page number, line index)} for the document title.
+
+    796 typed a title set on three lines as THREE `Section`s. A title on three
+    lines is one title, and MathPix ships it as one `title` line — pdfdrill's
+    `_extract_title` already merges consecutive ones, so emitting the type is
+    the whole fix.
+
+    Established by: the largest type size on the first page carrying text, and
+    the CONSECUTIVE run of lines at that size starting from the first of them.
+    Consecutive is what makes it one title rather than every large line on the
+    page; the run stops at the first line that is not title-sized, which is the
+    authors block or the abstract.
+
+    Abstains when the page has no size contrast — a page set entirely in one
+    size has no title to find, and calling its first lines a title would delete
+    them from the prose.
+    """
+    for p in pages:
+        sizes = [line_size(ln) for ln in p.lines if ln.glyphs and not ln.rotated]
+        sizes = [s for s in sizes if s > 0]
+        if len(sizes) < 4:
+            continue
+        top = max(sizes)
+        body = collections.Counter(round(s, 1) for s in sizes).most_common(1)[0][0]
+        if top < 1.15 * body:
+            return set()              # no contrast: nothing here is a title
+        run, started = set(), False
+        for i, ln in enumerate(p.lines):
+            if not ln.glyphs or ln.rotated:
+                continue
+            # A line of glyphs that are all whitespace has a size and no
+            # text; it neither starts a title nor ends one, so it is passed
+            # over rather than swept in. Two of them bracketed 1107.2723's
+            # title and arrived as `title` lines with a body of " ".
+            if not docmodel._run_text(ln.glyphs).strip():
+                continue
+            if line_size(ln) >= 0.95 * top:
+                run.add((p.page, i))
+                started = True
+            elif started:
+                break                 # the run ended; the rest is not title
+        return run
+    return set()
+
+
 def classify_lines(pages: list[PageNode]) -> dict:
     """{(page number, line index): (type, extra fields)} for the whole document.
 
@@ -2335,6 +2433,12 @@ def classify_lines(pages: list[PageNode]) -> dict:
     from one page to the next.
     """
     fp = profile(pages)
+    # Document-level types FIRST: both are decided across pages, and both would
+    # otherwise be claimed by `section_header`, which asks only about size. A
+    # running header is often bold, and a title is by definition the largest
+    # thing on the page.
+    running = _running_lines(pages)
+    titles = _title_lines(pages)
     out: dict = {}
     for p in pages:
         left, right = _left_margin(p), _right_margin(p)
@@ -2342,6 +2446,12 @@ def classify_lines(pages: list[PageNode]) -> dict:
         for i, ln in enumerate(p.lines):
             if not ln.glyphs:
                 out[(p.page, i)] = ("text", {})
+                continue
+            if (p.page, i) in running:
+                out[(p.page, i)] = ("page_info", {})
+                continue
+            if (p.page, i) in titles:
+                out[(p.page, i)] = ("title", {})
                 continue
             lst = listings.get(i)
             if lst is not None:

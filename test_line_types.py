@@ -168,3 +168,85 @@ class TestContainment:
 
     def test_a_page_with_no_lines_gets_no_container(self):
         assert docmodel.to_lines_json([page([])])["pages"][0]["lines"] == []
+
+
+class TestRunningHeaders:
+    """`Signal & Image Processing … Vol.2, No.2, June 2011` stands at the top of
+    all 16 pages of 1107.2723 and arrived as 16 Paragraphs, because nothing
+    typed it and `text` becomes prose."""
+
+    def _doc(self, n=6, header="Journal of Measured Things Volume 2 Number 2"):
+        pages = []
+        for k in range(1, n + 1):
+            body = [line(f"body line {i} of page {k}", y=600.0 - 12 * i)
+                    for i in range(10)]
+            hdr = line(header, y=820.0)
+            folio = line(str(100 + k), x0=300.0, y=30.0)
+            p = page(body + [hdr, folio])
+            p.page = k
+            for ln in p.lines:
+                ln.page = k
+            pages.append(p)
+        return pages
+
+    def test_a_repeating_header_is_page_info(self):
+        t = mmd.classify_lines(self._doc())
+        hdr = [v for (pg, i), v in t.items() if pg == 1 and v[0] == "page_info"]
+        assert hdr, "the header repeated on every page is still prose"
+
+    def test_a_bare_folio_is_page_info_even_though_it_never_repeats(self):
+        """The repeat test cannot see a page number — it differs on every page.
+        A line in the margin band that is nothing but digits is one anyway."""
+        pages = self._doc()
+        t = mmd.classify_lines(pages)
+        folio = t[(3, len(pages[2].lines) - 1)]
+        assert folio[0] == "page_info", folio
+
+    def test_body_text_in_the_middle_of_the_page_is_never_page_info(self):
+        t = mmd.classify_lines(self._doc())
+        assert t[(1, 0)][0] != "page_info"
+
+    def test_two_pages_abstain(self):
+        """A line on both pages of a two-page document is as likely to be a
+        coincidence as a header, and being wrong deletes a paragraph."""
+        assert all(v[0] != "page_info"
+                   for v in mmd.classify_lines(self._doc(n=2)).values())
+
+
+class TestTitle:
+    """796 typed a title set on three lines as THREE `Section`s. A title on
+    three lines is one title."""
+
+    def _front(self):
+        big = [line("TOPOGRAPHIC FEATURE EXTRACTION", y=800.0, size=18.0),
+               line("FOR", y=778.0, size=18.0),
+               line("BENGALI AND HINDI CHARACTER IMAGES", y=756.0, size=18.0)]
+        rest = [line(f"body line {i} set in the document text size", y=700.0 - 12 * i)
+                for i in range(10)]
+        return [page(big + rest)]
+
+    def test_the_run_of_largest_lines_is_the_title(self):
+        t = mmd.classify_lines(self._front())
+        assert [t[(1, i)][0] for i in range(3)] == ["title"] * 3
+
+    def test_the_run_stops_at_the_first_smaller_line(self):
+        """Consecutive is what makes it ONE title rather than every large line
+        on the page."""
+        t = mmd.classify_lines(self._front())
+        assert t[(1, 3)][0] != "title"
+
+    def test_a_page_with_no_size_contrast_has_no_title(self):
+        """Calling the first lines of a uniformly-set page a title deletes them
+        from the prose."""
+        flat = [page([line(f"body line {i} all one size", y=700.0 - 12 * i)
+                      for i in range(10)])]
+        assert all(v[0] != "title" for v in mmd.classify_lines(flat).values())
+
+    def test_a_whitespace_line_neither_starts_nor_ends_the_title(self):
+        """Two of them bracketed 1107.2723's title and arrived as `title` lines
+        with a body of " "."""
+        pages = self._front()
+        pages[0].lines.insert(0, line("   ", y=810.0, size=18.0))
+        t = mmd.classify_lines(pages)
+        assert t[(1, 0)][0] != "title"
+        assert [t[(1, i)][0] for i in (1, 2, 3)] == ["title"] * 3
