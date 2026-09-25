@@ -2292,6 +2292,91 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
     return "\n".join(head) + "\n" + body + "\n" + r"\end{document}" + "\n"
 
 
+#: Line types this classifier can justify from a measurement, in the vocabulary
+#: pdfdrill's docmodel modules already read (`table.py` wants `simple_cell`,
+#: `header.py` wants `section_header`, `code_listing.py` wants `code`…). A type
+#: not listed here is one nothing measures yet; inventing it would produce a
+#: Section the document does not contain, and every projection would carry it.
+LINE_TYPES = ("text", "math", "equation", "equation_number", "section_header",
+              "code", "diagram")
+
+
+def _listing_rows(page: PageNode) -> dict:
+    """{line index: the Listing it belongs to} for every line inside one.
+
+    `listings.accumulate` measured these on the glyph grid — the monospace cell
+    width, the drawn frame, the language. A listing's lines are the one thing
+    this program reads BETTER than MathPix (674/676), and they reached pdfdrill
+    as undifferentiated prose because nothing carried the fact across.
+    """
+    rows: dict = {}
+    for lst in getattr(page, "listings", None) or []:
+        a, b = getattr(lst, "line_start", -1), getattr(lst, "line_end", -1)
+        if a < 0 or b < a:
+            continue
+        for i in range(a, b + 1):
+            rows[i] = lst
+    return rows
+
+
+def classify_lines(pages: list[PageNode]) -> dict:
+    """{(page number, line index): (type, extra fields)} for the whole document.
+
+    THE ORDER IS THE ORDER OF CERTAINTY. A listing is bounded by a drawn
+    rectangle or a monospace grid and does not depend on reading the text; a
+    heading is a font-size rank; a display is an indent past the body margin.
+    The softest test — "these glyphs are in a maths family" — runs last, so it
+    can never overrule a harder one. Anything not established stays `text`,
+    which is what an unread line has always been.
+
+    One pass over the document, because the heading test needs the document's
+    FONT PROFILE and the display test needs each page's margins: deciding a
+    line's type in isolation is what makes a classifier disagree with itself
+    from one page to the next.
+    """
+    fp = profile(pages)
+    out: dict = {}
+    for p in pages:
+        left, right = _left_margin(p), _right_margin(p)
+        listings = _listing_rows(p)
+        for i, ln in enumerate(p.lines):
+            if not ln.glyphs:
+                out[(p.page, i)] = ("text", {})
+                continue
+            lst = listings.get(i)
+            if lst is not None:
+                extra = {}
+                lang = getattr(lst, "language", None)
+                if lang:
+                    extra["language"] = lang
+                out[(p.page, i)] = ("code", extra)
+                continue
+            level = heading_level(ln, fp)
+            if level:
+                out[(p.page, i)] = ("section_header", {"level": level})
+                continue
+            if ln.rotated:
+                # Sideways text is a stamp or a margin note, never the flow.
+                out[(p.page, i)] = ("text", {"rotated": True})
+                continue
+            if is_display(ln, left, right):
+                out[(p.page, i)] = ("equation", {})
+                continue
+            if sum(1 for g in ln.glyphs if g.is_math) >= 0.6 * len(ln.glyphs):
+                out[(p.page, i)] = ("math", {})
+                continue
+            # LAST, THE NODE'S OWN VERDICT. `LineNode.type` is already
+            # "formula" for a line the span reader read as mathematics, and it
+            # is a better signal than the glyph-family count for a line of
+            # prose with one inline expression in it. Dropping to a literal
+            # "text" here lost all 23 formula lines of 1107.2723 — a
+            # classifier that knows less than the node it is classifying.
+            # `formula` is spelled `math` because that is the word pdfdrill's
+            # modules read; `equation` above is the display case.
+            out[(p.page, i)] = ("math" if ln.type == "formula" else "text", {})
+    return out
+
+
 def font_report(pages: list[PageNode]) -> str:
     """Document the type sizes and fonts, and what was inferred from them.
 

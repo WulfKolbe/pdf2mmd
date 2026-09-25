@@ -3710,6 +3710,23 @@ def to_lines_json(pages: list[PageNode],
     from here, put it straight into a crop URL, and get that region back.
     """
     k = px_per_pt
+    # THE LINE TYPE, from the one classifier. `LineNode.type` is "text" or
+    # "formula" — two values, and pdfdrill's twenty docmodel modules key off
+    # SIXTEEN, so a two-type stream can only ever produce paragraphs. The
+    # classifier lives in `project_mmd` because that is where its inputs are
+    # (the document font profile, each page's margins, the listing grid);
+    # imported late because that module builds on the node types defined here.
+    # A failure here must not cost the geometry, which is the part that is
+    # always right: fall back to the node's own type.
+    try:
+        from project_mmd import classify_lines
+        _types = classify_lines(pages)
+    except Exception:                                    # noqa: BLE001
+        _types = {}
+
+    def _line_type(p, i, ln) -> tuple:
+        return _types.get((p.page, i)) or (ln.type, {})
+
     return {
         "pages": [
             {
@@ -3740,7 +3757,7 @@ def to_lines_json(pages: list[PageNode],
                         # the region's corners, which is what they emit for
                         # printed text too.
                         "id": ln.id,
-                        "type": ln.type,
+                        "type": _line_type(p, i, ln)[0],
                         "line": i + 1,
                         "column": 0,
                         "font_size": round(line_font_size(ln)),
@@ -3775,6 +3792,11 @@ def to_lines_json(pages: list[PageNode],
                              "font": g.fontname, "glyphname": g.glyphname}
                             for g in ln.glyphs if g.tex.latex is None
                         ],
+                        # What the type brought with it — a heading's LEVEL, a
+                        # listing's LANGUAGE. Carried beside the type rather
+                        # than encoded into it, so a reader that ignores them
+                        # still reads the type.
+                        **_line_type(p, i, ln)[1],
                     }
                     for i, ln in enumerate(p.lines)
                 ],
