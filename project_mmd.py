@@ -2299,7 +2299,7 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
 #: Section the document does not contain, and every projection would carry it.
 LINE_TYPES = ("text", "math", "equation", "equation_number", "section_header",
               "code", "diagram", "page_info", "title", "rotated_text",
-              "authors", "abstract")
+              "authors", "abstract", "caption", "table")
 
 
 def _listing_rows(page: PageNode) -> dict:
@@ -2445,6 +2445,163 @@ _ABSTRACT_LABELS = frozenset({
 })
 
 
+#: What a caption's first word can be, by language. As with `_ABSTRACT_LABELS`,
+#: these are words a publisher prints — extend by adding one, not by translating.
+_CAPTION_LABELS = {
+    "table": "table", "tabelle": "table", "tabla": "table", "tabella": "table",
+    "tabel": "table", "tabela": "table", "tabell": "table",
+    "figure": "figure", "fig": "figure", "abbildung": "figure", "abb": "figure",
+    "figura": "figure", "figuur": "figure", "bild": "figure",
+}
+
+#: `Table 2:` / `Abbildung 3.1.` / `Fig. 4 –` — a label word, a number, and a
+#: separator. The separator matters: without it `Table 2 shows that …` in
+#: running prose reads as a caption, and a sentence becomes a figure.
+_CAPTION_RE = re.compile(
+    r"^\s*([A-Za-zÄÖÜäöü]+)\s*\.?\s*(\d+(?:[.\-]\d+)*)\s*[-:.\u2013\u2014)]",
+    re.UNICODE)
+
+
+def _caption_of(ln: LineNode) -> "dict | None":
+    """`{"label": "table"|"figure", "number": "2"}` for a caption line, else None."""
+    m = _CAPTION_RE.match(docmodel._run_text(ln.glyphs))
+    if not m:
+        return None
+    kind = _CAPTION_LABELS.get(m.group(1).lower().rstrip("."))
+    return {"label": kind, "number": m.group(2)} if kind else None
+
+
+def _rule_clusters(page: PageNode) -> list:
+    """Horizontal rules grouped into the bands a table draws.
+
+    A ruled table is its rules: booktabs prints a top, a mid and a bottom, and
+    the page carries nothing else of that shape at that width. Grouped by
+    shared x-EXTENT first — two columns of tables interleave in y and cannot be
+    separated by height alone — then by contiguity within the column.
+
+    The gap that separates two tables is NOT reliably larger than the gap
+    inside one: on 1909.00741 page 7 the body of one table is 73pt and the
+    space to the next is 73pt too. So this returns candidate bands and lets the
+    CAPTION decide which is which, rather than inventing a threshold that page
+    already disproves.
+    """
+    rules = [r for ln in page.lines for r in ln.rules]
+    horiz = [r for r in rules
+             if (r.rect[2] - r.rect[0]) > 3 * max(r.rect[3] - r.rect[1], 0.1)]
+    by_span: dict = {}
+    for r in horiz:
+        key = (round(r.rect[0] / 6.0), round(r.rect[2] / 6.0))
+        by_span.setdefault(key, []).append(r)
+    out = []
+    for key, rs in by_span.items():
+        if len(rs) < 2:
+            continue                       # one rule is a separator, not a table
+        rs.sort(key=lambda r: -r.rect[3])
+        out.append(rs)
+    return out
+
+
+def _modal_leading(page: PageNode) -> float:
+    """The page's usual line spacing — the gap a table's rows sit at, and the
+    unit a bigger gap is measured against."""
+    gaps = [a.rect[3] - b.rect[3]
+            for a, b in zip(page.lines, page.lines[1:])
+            if a.glyphs and b.glyphs and 0 < a.rect[3] - b.rect[3] < 60]
+    if not gaps:
+        return 0.0
+    rounded = [round(g, 1) for g in gaps]
+    return max(set(rounded), key=rounded.count)
+
+
+def table_regions(page: PageNode) -> list:
+    """The tables on this page: each a rectangle, its rules, and its caption.
+
+    THE CAPTION IS THE ANCHOR, because the rules alone cannot say where one
+    table ends and the next begins. On 1909.00741 page 7 the body of a table is
+    73pt tall and the space to the next table is also 73pt: any threshold that
+    splits them splits the body too. A caption does not have that problem — it
+    names its table, and the next caption in the same column bounds it.
+
+    Caption ABOVE or BELOW, because both are printed: a table caption sits
+    above in most styles and a figure caption below, and a reader that assumes
+    one loses the other. The caption taken is the NEAREST one in the column,
+    on whichever side, that no closer rule separates from the table.
+
+    A rule cluster with no caption yields no table. It is a rule cluster — a
+    form, a letterhead, a signature line — and calling it a table would put an
+    empty `tabular` into every projection of a letter.
+    """
+    clusters = _rule_clusters(page)
+    if not clusters:
+        return []
+    caps = [(i, ln, c) for i, ln in enumerate(page.lines)
+            if ln.glyphs and (c := _caption_of(ln)) and c["label"] == "table"]
+    if not caps:
+        return []
+    out = []
+    for rs in clusters:
+        x0 = min(r.rect[0] for r in rs); x1 = max(r.rect[2] for r in rs)
+        # captions in THIS column — x-overlap, not containment: a caption often
+        # runs a little wider or narrower than the rules it names.
+        col = [(i, ln, c) for i, ln, c in caps
+               if min(ln.rect[2], x1) - max(ln.rect[0], x0) > 0.4 * (x1 - x0)]
+        if not col:
+            continue
+        # ORDER, not the caption's own band. A caption line is often MERGED
+        # with the table's header row — on 1909.00741 page 7 the line reading
+        # `Table 2: Pool CL: Conservative AssessmentSystem Precisio…` is 37pt
+        # tall and swallows the rules it should sit above. Its TOP is still
+        # exactly where the table begins, so each caption owns the rules
+        # between its own top and the next caption's top.
+        col.sort(key=lambda t: -t[1].rect[3])
+        for k, (ci, cln, c) in enumerate(col):
+            # THE RULES SAY A TABLE IS HERE; THE CAPTIONS BOUND IT. Taking the
+            # rules' own extent gave a rectangle 11.4pt tall — the band between
+            # toprule and midrule — while the body sat 40pt below it, outside.
+            # The band that contains a table is from its caption down to the
+            # next caption in the column, and the rules inside that band are
+            # what makes it a table rather than a paragraph.
+            top_y = cln.rect[3]
+            nxt = col[k + 1][1].rect[3] if k + 1 < len(col) else -1e9
+            mine = [r for r in rs if nxt < r.rect[3] <= top_y]
+            if len(mine) < 2:
+                continue
+            top = top_y
+            # CONTAINED in this column, not merely overlapping it. The line
+            # reader merges a two-column row into ONE full-width line, and such
+            # a line overlaps a 240pt column by its whole width — so an overlap
+            # test admitted it and the table came out 506pt wide, spanning both
+            # columns. A line wider than the rules it sits under is not a row
+            # of that table.
+            band = [ln for ln in page.lines
+                    if ln.glyphs and ln.rect[3] <= top and ln.rect[1] > nxt
+                    and ln.rect[0] >= x0 - 6.0 and ln.rect[2] <= x1 + 6.0]
+            band.sort(key=lambda ln: -ln.rect[3])
+            # AND IT ENDS AT A GAP, not at the next caption. The next caption
+            # can be most of a page away — Table 4's is 285pt below it — and a
+            # band that runs that far swallows whatever sits between. A table
+            # ends where its rows stop, which is the first vertical gap wider
+            # than twice the leading.
+            lead = _modal_leading(page) or 12.0
+            inner = []
+            for ln in band:
+                if inner and inner[-1].rect[1] - ln.rect[3] > 2.0 * lead:
+                    break
+                inner.append(ln)
+            last_rule = min(r.rect[1] for r in mine)
+            bot = min([last_rule] + [ln.rect[1] for ln in inner])
+            # PER TABLE, never back into the cluster. Widening `x0`/`x1`
+            # themselves carried one table's extent into every later table in
+            # the same cluster: Table 4 came out 506pt wide, spanning both
+            # columns, because an earlier table had already stretched them.
+            tx0 = min([x0] + [ln.rect[0] for ln in inner]) if inner else x0
+            tx1 = max([x1] + [ln.rect[2] for ln in inner]) if inner else x1
+            out.append({"rect": (tx0, bot, tx1, top), "rules": mine,
+                        "caption_index": ci, "caption": c,
+                        "lines": [page.lines.index(ln) for ln in inner]})
+    return out
+
+
 def _front_matter(pages: list[PageNode], fp, titles: set, running: set) -> tuple:
     """({authors lines}, {abstract lines}) — both bounded, or neither.
 
@@ -2546,6 +2703,14 @@ def classify_lines(pages: list[PageNode]) -> dict:
                 continue
             if (p.page, i) in abstract:
                 out[(p.page, i)] = ("abstract", {})
+                continue
+            # A caption before a heading: `Table 2: …` set in bold can rank as
+            # one, and a caption read as a section splits the document there.
+            cap = _caption_of(ln)
+            if cap:
+                out[(p.page, i)] = ("caption",
+                                    {"label": cap["label"],
+                                     "number": cap["number"]})
                 continue
             lst = listings.get(i)
             if lst is not None:

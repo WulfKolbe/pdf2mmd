@@ -3797,6 +3797,9 @@ def to_lines_json(pages: list[PageNode],
                         # than encoded into it, so a reader that ignores them
                         # still reads the type.
                         **_line_type(p, i, ln)[1],
+                        # the source line index, so a container added
+                        # afterwards can name its children by id
+                        "_i": i,
                     }
                     for i, ln in enumerate(p.lines)
                 ],
@@ -3805,7 +3808,63 @@ def to_lines_json(pages: list[PageNode],
         ]
     }
     _add_column_containers(out, pages, k)
+    _add_table_containers(out, pages, k)
     return out
+
+
+def _add_table_containers(out: dict, pages: list["PageNode"], k: float) -> None:
+    """A `table` container per ruled table, with its rows as children and its
+    caption named.
+
+    MathPix ships a `table` whose children are its cells; we do not measure
+    cells yet, so ours holds ROWS — the lines inside the rectangle. That is the
+    logical first step the user asked for: a correct rectangle and the caption
+    that belongs to it, before any attempt at `tabular`.
+
+    `caption_id` rather than nesting the caption as a child, because a caption
+    is printed ABOVE the table in most styles and BELOW in others, and a tree
+    that makes it a child has to pick one. Naming it leaves the order on the
+    page where it belongs.
+    """
+    from project_mmd import table_regions
+    for page_rec, p in zip(out["pages"], pages):
+        try:
+            regions = table_regions(p)
+        except Exception:                                # noqa: BLE001
+            continue
+        if not regions:
+            continue
+        recs = page_rec["lines"]
+        by_index = {}
+        for r in recs:
+            if r.get("_i") is not None:
+                by_index[r["_i"]] = r
+        containers = []
+        for n, t in enumerate(regions):
+            x0, y0, x1, y1 = t["rect"]
+            kids = [by_index[i]["id"] for i in t["lines"] if i in by_index]
+            cap = by_index.get(t["caption_index"])
+            tid = f"{page_rec.get('image_id') or p.page}-tab{n}"
+            for i in t["lines"]:
+                if i in by_index:
+                    by_index[i].setdefault("parent_id", tid)
+            containers.append({
+                "id": tid, "type": "table", "line": 0, "font_size": 0,
+                "is_printed": True, "is_handwritten": False,
+                "conversion_output": False, "confidence": 1.0,
+                "confidence_rate": 1.0,
+                "cnt": _contour((x0, y0, x1, y1), p, k),
+                "region": {
+                    "top_left_x": round(x0 * k),
+                    "top_left_y": round((p.rect[3] - y1) * k),
+                    "width": max(1, round((x1 - x0) * k)),
+                    "height": max(1, round((y1 - y0) * k)),
+                },
+                "text": "", "children_ids": kids,
+                "caption_id": cap["id"] if cap else None,
+                "caption_number": t["caption"]["number"],
+            })
+        page_rec["lines"] = containers + recs
 
 
 def _add_column_containers(out: dict, pages: list["PageNode"], k: float) -> None:

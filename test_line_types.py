@@ -345,3 +345,40 @@ class TestFrontMatter:
         flat = [page([line(f"body line {i} all one size", y=700.0 - 12 * i)
                       for i in range(10)])]
         assert all(v[0] != "authors" for v in mmd.classify_lines(flat).values())
+
+
+class TestCaptionsAndTables:
+    """MathPix crops a table to an image; the goal is a LaTeX `tabular`. The
+    logical first step is a correct rectangle and the caption that belongs to
+    it — measured on 1909.00741 page 7, six tables in two columns."""
+
+    def test_a_caption_needs_its_separator(self):
+        """`Table 2 shows that …` in running prose is a sentence. Without the
+        separator a sentence becomes a figure."""
+        assert mmd._caption_of(line("Table 2: Pool CL Conservative Assessment"))
+        assert mmd._caption_of(line("Figure 3. Images with labels"))
+        assert mmd._caption_of(line("Abbildung 4 - Ergebnisse"))
+        assert mmd._caption_of(line("Table 2 shows that the method works")) is None
+
+    def test_an_unknown_first_word_is_not_a_caption(self):
+        assert mmd._caption_of(line("Equation 7: the field tensor")) is None
+
+    def test_the_label_and_number_are_carried(self):
+        c = mmd._caption_of(line("Tabelle 3.1: Messwerte"))
+        assert c == {"label": "table", "number": "3.1"}
+
+    def test_a_rule_cluster_with_no_caption_is_not_a_table(self):
+        """A form, a letterhead, a signature line. Calling it a table would put
+        an empty tabular into every projection of a letter."""
+        p = page([line(f"body line {i} of a plain page", y=700.0 - 12 * i)
+                  for i in range(10)])
+        assert mmd.table_regions(p) == []
+
+    def test_one_rule_is_a_separator_not_a_table(self):
+        from docmodel_six import RuleNode
+        p = page([line("Table 1: a caption above one rule", y=700.0)] +
+                 [line(f"body {i}", y=680.0 - 12 * i) for i in range(6)])
+        p.lines[0].rules = [RuleNode(id="r", page=1,
+                                     rect=(54.0, 690.0, 294.0, 690.6),
+                                     role="fraction")]
+        assert mmd.table_regions(p) == []
