@@ -2298,7 +2298,7 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
 #: not listed here is one nothing measures yet; inventing it would produce a
 #: Section the document does not contain, and every projection would carry it.
 LINE_TYPES = ("text", "math", "equation", "equation_number", "section_header",
-              "code", "diagram", "page_info", "title")
+              "code", "diagram", "page_info", "title", "rotated_text")
 
 
 def _listing_rows(page: PageNode) -> dict:
@@ -2317,6 +2317,23 @@ def _listing_rows(page: PageNode) -> dict:
         for i in range(a, b + 1):
             rows[i] = lst
     return rows
+
+
+def _rotation_of(ln: LineNode) -> int:
+    """The line's rotation in degrees, from the glyph text matrix.
+
+    `(a, b, c, d, e, f)` — `b` and `c` carry the rotation, and for the two
+    cases that occur in documents (90 deg either way) their signs decide it.
+    Anything else is reported as 0 rather than guessed at: a reader that
+    rotates a crop by a wrong angle produces a picture of nothing.
+    """
+    g = next((g for g in ln.glyphs if g.text.strip()), None)
+    if g is None:
+        return 0
+    a, b, c, d = (g.matrix + (0, 0, 0, 0))[:4]
+    if abs(a) < 1e-6 and abs(d) < 1e-6:
+        return 90 if b > 0 else 270
+    return 0
 
 
 def _running_lines(pages: list[PageNode]) -> set:
@@ -2466,8 +2483,18 @@ def classify_lines(pages: list[PageNode]) -> dict:
                 out[(p.page, i)] = ("section_header", {"level": level})
                 continue
             if ln.rotated:
-                # Sideways text is a stamp or a margin note, never the flow.
-                out[(p.page, i)] = ("text", {"rotated": True})
+                # SIDEWAYS TEXT IS ITS OWN KIND. Established by the CTM, not by
+                # reading: the glyphs' text matrix is rotated off the page axis.
+                # It is never part of the flow — it is a stamp, a margin note,
+                # a spine title — and typing it `text` put an arXiv identifier
+                # into the running prose of the paper it identifies.
+                #
+                # MathPix has no name for this, so the name is ours, and it
+                # matches the property `pageprofile` already reports
+                # (`rotated-text`). The angle rides along, because a reader
+                # deciding whether to rotate a crop needs it and re-deriving it
+                # from a rectangle is impossible.
+                out[(p.page, i)] = ("rotated_text", {"rotation": _rotation_of(ln)})
                 continue
             if is_display(ln, left, right):
                 out[(p.page, i)] = ("equation", {})

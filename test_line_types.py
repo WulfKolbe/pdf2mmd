@@ -250,3 +250,49 @@ class TestTitle:
         t = mmd.classify_lines(pages)
         assert t[(1, 0)][0] != "title"
         assert [t[(1, i)][0] for i in (1, 2, 3)] == ["title"] * 3
+
+
+class TestRotatedText:
+    """An arXiv identifier stamped down the left margin belongs to the ARCHIVE,
+    not to the paper. Typed `text`, it arrived inside the running prose of the
+    section it sits beside — and on the readers that group by baseline it
+    arrived as single-character lines, an extra column of nonsense."""
+
+    def _sideways(self, text="arXiv:1909.00741v1", deg=90):
+        gs, y = [], 300.0
+        for ch in text:
+            g_ = g(ch, 20.0, y)
+            # the CTM is the whole test: rotation lives in b and c
+            g_.matrix = (0, 10.0, -10.0, 0, 20.0, y) if deg == 90 else \
+                        (0, -10.0, 10.0, 0, 20.0, y)
+            gs.append(g_)
+            y += 6.0
+        ln = LineNode(id="rot", page=1, rect=(16.0, 300.0, 36.0, y),
+                      type="text", glyphs=gs)
+        ln.rotated = True
+        body = [line(f"body line {i} of ordinary prose", y=700.0 - 12 * i)
+                for i in range(10)]
+        return [page([ln] + body)]
+
+    def test_sideways_text_is_its_own_type(self):
+        t = mmd.classify_lines(self._sideways())
+        assert t[(1, 0)][0] == "rotated_text"
+
+    def test_the_angle_rides_along(self):
+        """A reader cropping the region needs it, and cannot recover it from a
+        rectangle."""
+        assert mmd.classify_lines(self._sideways(deg=90))[(1, 0)][1]["rotation"] == 90
+        assert mmd.classify_lines(self._sideways(deg=270))[(1, 0)][1]["rotation"] == 270
+
+    def test_upright_prose_is_never_rotated_text(self):
+        t = mmd.classify_lines(self._sideways())
+        assert all(v[0] != "rotated_text" for k, v in t.items() if k != (1, 0))
+
+    def test_it_reaches_the_lines_json_with_its_rectangle(self):
+        recs = docmodel.to_lines_json(self._sideways())["pages"][0]["lines"]
+        rot = [r for r in recs if r["type"] == "rotated_text"]
+        assert len(rot) == 1
+        r = rot[0]
+        assert r["region"]["height"] > r["region"]["width"], \
+            "a 90-degree stamp is taller than it is wide"
+        assert r["rotation"] == 90
