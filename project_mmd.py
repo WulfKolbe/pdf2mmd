@@ -2298,7 +2298,8 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
 #: not listed here is one nothing measures yet; inventing it would produce a
 #: Section the document does not contain, and every projection would carry it.
 LINE_TYPES = ("text", "math", "equation", "equation_number", "section_header",
-              "code", "diagram", "page_info", "title", "rotated_text")
+              "code", "diagram", "page_info", "title", "rotated_text",
+              "authors", "abstract")
 
 
 def _listing_rows(page: PageNode) -> dict:
@@ -2434,6 +2435,75 @@ def _title_lines(pages: list[PageNode]) -> set:
     return set()
 
 
+#: Headings whose block IS the abstract, by language. A label, not a guess: the
+#: line must be a heading already (size rank) AND read as one of these. Extend
+#: by adding the word a publisher actually prints, not a translation of it.
+_ABSTRACT_LABELS = frozenset({
+    "abstract", "zusammenfassung", "kurzfassung", "resume", "resumen",
+    "riassunto", "sommario", "sumario", "samenvatting", "streszczenie",
+    "sammanfattning", "resumo", "abstrakt", "annotacia",
+})
+
+
+def _front_matter(pages: list[PageNode], fp, titles: set, running: set) -> tuple:
+    """({authors lines}, {abstract lines}) — both bounded, or neither.
+
+    These two are the reason `title` was worth doing first: each is defined by
+    what SURROUNDS it, and the title is the upper bound.
+
+    `authors` runs from the line after the title to the first heading on that
+    page. `abstract` runs from the line after a heading that READS as an
+    abstract label to the next heading. Both stop at something measured.
+
+    AND BOTH ABSTAIN WHEN THE BOUND IS MISSING. A front matter with no heading
+    after the title has no measurable end to its author block, and taking "the
+    rest of the page" would swallow the first section of the paper. Absent is
+    the correct answer; `text` is what those lines already were.
+
+    The abstract LABEL stays `section_header`. The heading is not the abstract,
+    it names it, and a consumer that wants the heading gone can drop it —
+    a consumer that needs it back cannot invent it.
+    """
+    if not pages:
+        return set(), set()
+    page = next((p for p in pages if any(ln.glyphs for ln in p.lines)), None)
+    if page is None:
+        return set(), set()
+
+    def is_heading(i: int, ln) -> bool:
+        return bool(ln.glyphs and not ln.rotated
+                    and (page.page, i) not in running
+                    and (page.page, i) not in titles
+                    and heading_level(ln, fp))
+
+    idx = [i for i, ln in enumerate(page.lines)
+           if ln.glyphs and docmodel._run_text(ln.glyphs).strip()]
+    title_pos = [i for i in idx if (page.page, i) in titles]
+    headings = [i for i in idx if is_heading(i, page.lines[i])]
+
+    authors: set = set()
+    if title_pos:
+        after = [i for i in idx if i > max(title_pos)]
+        stop = next((h for h in headings if h > max(title_pos)), None)
+        if stop is not None:                      # bounded below by a heading
+            authors = {(page.page, i) for i in after if i < stop
+                       and (page.page, i) not in running}
+
+    abstract: set = set()
+    for h in headings:
+        text = re.sub(r"[^a-zäöüßа-я]+", "",
+                      docmodel._run_text(page.lines[h].glyphs).lower())
+        if text not in _ABSTRACT_LABELS:
+            continue
+        nxt = next((x for x in headings if x > h), None)
+        if nxt is None:
+            break                                 # no end: do not guess one
+        abstract = {(page.page, i) for i in idx if h < i < nxt
+                    and (page.page, i) not in running}
+        break
+    return authors, abstract
+
+
 def classify_lines(pages: list[PageNode]) -> dict:
     """{(page number, line index): (type, extra fields)} for the whole document.
 
@@ -2456,6 +2526,7 @@ def classify_lines(pages: list[PageNode]) -> dict:
     # thing on the page.
     running = _running_lines(pages)
     titles = _title_lines(pages)
+    authors, abstract = _front_matter(pages, fp, titles, running)
     out: dict = {}
     for p in pages:
         left, right = _left_margin(p), _right_margin(p)
@@ -2469,6 +2540,12 @@ def classify_lines(pages: list[PageNode]) -> dict:
                 continue
             if (p.page, i) in titles:
                 out[(p.page, i)] = ("title", {})
+                continue
+            if (p.page, i) in authors:
+                out[(p.page, i)] = ("authors", {})
+                continue
+            if (p.page, i) in abstract:
+                out[(p.page, i)] = ("abstract", {})
                 continue
             lst = listings.get(i)
             if lst is not None:

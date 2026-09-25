@@ -296,3 +296,52 @@ class TestRotatedText:
         assert r["region"]["height"] > r["region"]["width"], \
             "a 90-degree stamp is taller than it is wide"
         assert r["rotation"] == 90
+
+
+class TestFrontMatter:
+    """`authors` and `abstract` are each defined by what SURROUNDS them, which
+    is why `title` had to come first: the title is the upper bound and the next
+    heading is the lower one."""
+
+    def _paper(self, with_heading=True, label="ABSTRACT"):
+        lines = [line("A TITLE SET LARGE", y=800.0, size=18.0),
+                 line("Ada Lovelace and Alan Turing", y=770.0, size=11.0),
+                 line("Department of Computing, Somewhere", y=756.0, size=11.0)]
+        if with_heading:
+            # 14pt against a 10pt body: `heading_level` ranks type SIZES, and
+            # 13pt does not clear the rank against this body. The fixture has
+            # to be a document the classifier could actually meet.
+            lines.append(line(label, y=730.0, size=14.0))
+            lines += [line(f"abstract sentence number {i} of the summary",
+                           y=710.0 - 12 * i) for i in range(4)]
+            lines.append(line("1. INTRODUCTION", y=640.0, size=14.0))
+        lines += [line(f"body line {i} of the paper proper", y=600.0 - 12 * i)
+                  for i in range(10)]
+        return [page(lines)]
+
+    def test_the_author_block_is_bounded_by_the_next_heading(self):
+        t = mmd.classify_lines(self._paper())
+        assert [t[(1, i)][0] for i in (1, 2)] == ["authors", "authors"]
+
+    def test_the_abstract_runs_from_its_label_to_the_next_heading(self):
+        t = mmd.classify_lines(self._paper())
+        assert t[(1, 3)][0] == "section_header", "the label is not the abstract"
+        assert [t[(1, i)][0] for i in (4, 5, 6, 7)] == ["abstract"] * 4
+        assert t[(1, 8)][0] == "section_header"
+        assert t[(1, 9)][0] != "abstract", "the abstract ended at the heading"
+
+    def test_a_german_label_is_recognised(self):
+        t = mmd.classify_lines(self._paper(label="Zusammenfassung"))
+        assert t[(1, 4)][0] == "abstract"
+
+    def test_without_a_closing_heading_both_abstain(self):
+        """A front matter with no heading after the title has no measurable end
+        to its author block, and taking 'the rest of the page' would swallow
+        the first section of the paper."""
+        t = mmd.classify_lines(self._paper(with_heading=False))
+        assert all(v[0] not in ("authors", "abstract") for v in t.values())
+
+    def test_a_page_with_no_title_has_no_author_block(self):
+        flat = [page([line(f"body line {i} all one size", y=700.0 - 12 * i)
+                      for i in range(10)])]
+        assert all(v[0] != "authors" for v in mmd.classify_lines(flat).values())
