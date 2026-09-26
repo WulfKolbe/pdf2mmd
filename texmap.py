@@ -298,6 +298,19 @@ _BOLD_NAME = re.compile(
     r"\bcm(bx|b|ssbx|bxti|bxsl)\d*|"  # Computer Modern bold family
     r"\bcmssdc\d*|"                   # CM sans demi condensed
     r"-(bd|bold|semibold|black|heavy)\b|"
+    # 814 — URW NAMED TIMES' BOLD "MEDIUM". `\textbf` under `times`/`mathptmx`
+    # resolves to `ptmb`, which embeds as `NimbusRomNo9L-Medi` — and that is
+    # pdfLaTeX's default Times substitute, so it is the commonest bold face in
+    # the corpus: 480 readings in 380 documents, every one of them invisible to
+    # this test. Measured over 393 documents using the family, 376 carry BOTH
+    # `-Regu` and `-Medi`, which settles which weight `Medi` is; only 4 have
+    # `Medi` alone. Scoped to NimbusRomNo9L on purpose — `NimbusSanL` and
+    # `NimbusMonL` spell their bold `-Bold`, so a blanket `medium` rule would
+    # also catch `NunitoExtraLight-Medium` and `Flama-Ultralight`, which are
+    # not bold at all. Same failure class as the CMBX note above.
+    r"\bnimbusromno9l-medi|"
+    # A truncated `-Bold`, as some producers write it (`NimbusSan-Bol`).
+    r"-bol\b|"
     r"(^|[^a-z])(bd|blk)\d*$",
     re.I,
 )

@@ -3809,7 +3809,80 @@ def to_lines_json(pages: list[PageNode],
     }
     _add_column_containers(out, pages, k)
     _add_table_containers(out, pages, k)
+    _split_runin_headings(out, pages, k)
     return out
+
+
+def _split_runin_headings(out: dict, pages: list["PageNode"], k: float) -> None:
+    r"""Make a run-in heading its own line, in front of the prose it introduces.
+
+    814 — `\paragraph{Analysis: Finance Benchmark}` sets its title bold at BODY
+    SIZE and lets the text run on from it after a 1 em space, so the heading and
+    the paragraph share one baseline and therefore one LineNode. Emitted whole,
+    the heading is the first three words of a paragraph — which is what it was,
+    in the docmodel and in every projection.
+
+    `project_mmd.runin_heading` measured where it ends; this makes that two line
+    records. The heading's rectangle stops at the last bold glyph and the prose's
+    starts at the first plain one, so the split is visible in the inspect view
+    and a crop of either is right. Both keep the line's vertical extent, because
+    they do share a baseline.
+
+    LAST, after the container passes, so a container that already lists the
+    original line gains the heading beside it rather than losing it.
+    """
+    for page_rec, p in zip(out["pages"], pages):
+        recs = page_rec["lines"]
+        by_i = {r.get("_i"): r for r in recs if r.get("_i") is not None}
+        made: list = []
+        for i, ln in enumerate(p.lines):
+            rec = by_i.get(i)
+            if rec is None:
+                continue
+            n = rec.pop("runin_split", None)
+            level = rec.pop("runin_level", None)
+            if not n or n >= len(ln.glyphs):
+                continue
+            head_gl, rest_gl = ln.glyphs[:n], ln.glyphs[n:]
+            # The word gap comes from the WHOLE line. Derived from the bold
+            # prefix alone — seven glyphs — the threshold lands above the real
+            # word space and `Base LLM` comes out `BaseLLM`. The line is one
+            # typographic unit; both halves are measured against it.
+            wg = _word_gap(ln.glyphs)
+            x0 = min(g.rect[0] for g in head_gl)
+            x1 = max(g.rect[2] for g in head_gl)
+            rx0 = min(g.rect[0] for g in rest_gl)
+            top_y = round((p.rect[3] - ln.rect[3]) * k)
+            height = max(1, round((ln.rect[3] - ln.rect[1]) * k))
+            head = dict(rec)
+            head["id"] = f"{rec['id']}h"
+            head["type"] = "section_header"
+            if level:
+                head["level"] = level
+            head["text"] = _run_text(head_gl, wg).strip()
+            head["region"] = {"top_left_x": round(x0 * k), "top_left_y": top_y,
+                              "width": max(1, round((x1 - x0) * k)),
+                              "height": height}
+            head["cnt"] = _contour((x0, ln.rect[1], x1, ln.rect[3]), p, k)
+            # The heading is not the prose: neither carries the other's pieces.
+            for key in ("gaps", "rules", "deferred_glyphs"):
+                head.pop(key, None)
+            rec["text"] = _run_text(rest_gl, wg).strip()
+            rec["region"] = {"top_left_x": round(rx0 * k), "top_left_y": top_y,
+                             "width": max(1, round((ln.rect[2] - rx0) * k)),
+                             "height": height}
+            rec["cnt"] = _contour((rx0, ln.rect[1], ln.rect[2], ln.rect[3]), p, k)
+            made.append((rec, head))
+        for rec, head in made:
+            recs.insert(recs.index(rec), head)
+            # A container listing the prose line must list the heading too, or
+            # the heading falls out of the reading order the container states.
+            for other in recs:
+                kids = other.get("children_ids")
+                if kids and rec["id"] in kids and head["id"] not in kids:
+                    kids.insert(kids.index(rec["id"]), head["id"])
+            if rec.get("parent_id"):
+                head["parent_id"] = rec["parent_id"]
 
 
 def _add_table_containers(out: dict, pages: list["PageNode"], k: float) -> None:

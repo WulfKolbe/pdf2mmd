@@ -158,7 +158,16 @@ def heading_level(ln: LineNode, fp: FontProfile) -> int:
         return 0
 
     if rank == 0:
-        if bold and 0 < len(text) <= 80:
+        # 814 — AT BODY SIZE, BOLDNESS IS THE ONLY EVIDENCE, and a sentence
+        # ending is evidence against. This branch reads a bold line no larger
+        # than the prose around it as a heading; a bold SENTENCE inside a
+        # callout box satisfies it exactly. Measured on 2609.26891 p2, where
+        # three lines of a bold aside became headings — `it's called — by the
+        # LLM in a Python REPL.`, `able in the REPL.` A heading is a label and
+        # does not end in a full stop. Only this weakest branch is guarded: a
+        # line that is CLEARLY LARGER than the body is a heading whatever its
+        # punctuation.
+        if bold and 0 < len(text) <= 80 and not text.rstrip().endswith("."):
             return 3
         return 0
     if len(text) > 120:
@@ -174,6 +183,88 @@ def heading_level(ln: LineNode, fp: FontProfile) -> int:
     if not bold and not fp.clearly_larger(size):
         return 0
     return {1: 3, 2: 2, 3: 1}[rank]
+
+
+#: A run-in heading is separated from the prose that follows it by LaTeX's
+#: `\paragraph` space — 1 em. Measured on 2510.04618 p7-p9: the separator is
+#: 9.96-10.21pt at a 10.0pt body size (1.00 em), while the ordinary inter-glyph
+#: gap on the same pages has median 2.75pt and p90 3.71pt (0.37 em). 0.6 em sits
+#: in the empty band between the two populations, so the test needs no absolute
+#: constant — it scales with the line's own font.
+_RUNIN_GAP_EM = 0.6
+
+#: Longest a run-in heading may be. `Analysis: Medical and Text-to-SQL
+#: Benchmark` is 41 characters; a bold clause longer than this inside prose is
+#: emphasis, which is what the existing `heading_level` cap of 80 is for too.
+_RUNIN_MAX_CHARS = 60
+
+#: Markdown level for a run-in heading. It is LaTeX's `\paragraph` — the
+#: unnumbered, bold, run-in sectioning command — which `docmodel`'s header
+#: module already maps to level 4.
+_RUNIN_LEVEL = 4
+
+
+def runin_heading(ln: LineNode, fp: "FontProfile") -> int:
+    r"""Index into `ln.glyphs` where a RUN-IN HEADING ends, or 0 for none.
+
+    814 — a heading that shares its baseline with the prose it introduces.
+    `\paragraph{Analysis: Finance Benchmark}` sets the title bold, at BODY
+    SIZE, and lets the text continue on the same line after a 1 em space:
+
+        **Analysis: Finance Benchmark** As shown in Table 2, ACE delivers …
+
+    `heading_level` cannot see it. It asks whether the LINE is bold, and this
+    line is bold only at the front, so the heading was read as the first three
+    words of a paragraph — in every projection, and in the docmodel, where it
+    became prose. Reported by a reader of 1-s2.0-S2590118425000565-main, whose
+    own headings are worse: section, subsection and run-in are all at 8.0pt
+    there, separated only by weight (Bold / Italic / Bold), so SIZE RANKING
+    yields one level for the whole document and the tree is flat.
+
+    The evidence is a bold prefix at body size, a gap of at least
+    `_RUNIN_GAP_EM`, and non-bold text after it. The gap is what separates a
+    heading from a sentence that merely opens in bold, and it is the feature a
+    reader names first: "the text ends with a larger white space".
+    """
+    gl = ln.glyphs
+    if not gl or ln.rotated or len(gl) < 8:
+        return 0
+    vis = [g for g in gl if not g.is_math]
+    if not vis:
+        return 0
+    # Body size only. A LARGER bold prefix is an ordinary heading and belongs to
+    # `heading_level`, which ranks it; claiming it here would flatten it to 4.
+    size = max((g.size for g in vis), default=0.0)
+    if size <= 0 or fp.rank(size) != 0:
+        return 0
+
+    n = 0
+    while n < len(gl) and (gl[n].is_math or _is_bold(gl[n].fontname.split("+")[-1])):
+        n += 1
+    # `n` may have run on through leading maths; require real bold text in it.
+    if not any(not g.is_math and _is_bold(g.fontname.split("+")[-1])
+               for g in gl[:n]):
+        return 0
+    if n == 0 or n >= len(gl):
+        return 0                       # all bold: an ordinary heading, not run-in
+
+    wg = docmodel._word_gap(gl)          # measured on the whole line, not a slice
+    head = docmodel._run_text(gl[:n], wg).strip()
+    rest = docmodel._run_text(gl[n:], wg).strip()
+    if not (3 <= len(head) <= _RUNIN_MAX_CHARS) or not any(c.isalpha() for c in head):
+        return 0
+    if len(rest) < 10:
+        return 0                       # a bold label with a word after it
+    # A heading is not a sentence. It may end in a colon (`Analysis:`); a full
+    # stop means the bold run was a sentence set in bold.
+    if head.endswith("."):
+        return 0
+    # The remainder must be ordinary text, or this is two bold things in a row.
+    if _is_bold(gl[n].fontname.split("+")[-1]):
+        return 0
+    if (gl[n].rect[0] - gl[n - 1].rect[2]) < _RUNIN_GAP_EM * size:
+        return 0
+    return n
 
 
 # --------------------------------------------------------------- projections
@@ -2797,6 +2888,18 @@ def classify_lines(pages: list[PageNode]) -> dict:
             level = heading_level(ln, fp)
             if level:
                 out[(p.page, i)] = ("section_header", {"level": level})
+                continue
+            # 814 — AFTER the whole-line test, because a line that is bold all
+            # the way across is an ordinary heading and `heading_level` ranks
+            # it properly; only a line that is bold at the FRONT and plain
+            # after a 1 em gap is a run-in heading. The line stays `text` — it
+            # still holds prose — and carries where the heading ends, so
+            # `to_lines_json` can emit the heading and the prose as the two
+            # lines they logically are, each with its own rectangle.
+            k = runin_heading(ln, fp)
+            if k:
+                out[(p.page, i)] = ("text", {"runin_split": k,
+                                             "runin_level": _RUNIN_LEVEL})
                 continue
             if ln.rotated:
                 # SIDEWAYS TEXT IS ITS OWN KIND. Established by the CTM, not by
