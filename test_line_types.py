@@ -382,3 +382,57 @@ class TestCaptionsAndTables:
                                      rect=(54.0, 690.0, 294.0, 690.6),
                                      role="fraction")]
         assert mmd.table_regions(p) == []
+
+
+class TestFootnotes:
+    """A footnote is not where its MARKER is. The marker sits mid-paragraph and
+    the body sits at the foot of the column, so reading order places it wrongly
+    and text matching places it on whatever prose is nearest. On 2510.04618 the
+    footnote `We mention IBM CUGA as a rough contextual reference…` was absorbed
+    into a Paragraph.
+
+    Measured there: body 10.0pt, footnote 8.97pt, last body line top y 123, the
+    footnote at y 99 and 79 — and NO footnote rule anywhere on the page, its
+    only rules being the table's 300pt higher. So the rule the specification
+    assumed cannot be required.
+    """
+
+    def _page_with_footnote(self, fn_size=8.0, n_body=10):
+        body = [line(f"body line {i} of the running prose", y=700.0 - 12 * i,
+                     size=10.0) for i in range(n_body)]
+        fn = [line("We mention IBM CUGA as a rough contextual reference",
+                   y=99.0, size=fn_size),
+              line("direct comparisons. CUGA's internal design differs",
+                   y=79.0, size=fn_size)]
+        return [page(body + fn)]
+
+    def test_smaller_text_below_the_last_body_line_is_a_footnote(self):
+        t = mmd.classify_lines(self._page_with_footnote())
+        assert [t[(1, 10)][0], t[(1, 11)][0]] == ["footnote", "footnote"]
+
+    def test_the_body_is_not_a_footnote(self):
+        t = mmd.classify_lines(self._page_with_footnote())
+        assert all(t[(1, i)][0] != "footnote" for i in range(10))
+
+    def test_a_uniform_page_has_no_footnote(self):
+        """Calling the last lines of a uniformly-set page a footnote deletes
+        them from the prose."""
+        t = mmd.classify_lines(self._page_with_footnote(fn_size=10.0))
+        assert all(v[0] != "footnote" for v in t.values())
+
+    def test_no_rule_is_required(self):
+        """2510.04618 draws none, and requiring one missed every footnote in
+        it. A rule corroborates; it is not the evidence."""
+        pages = self._page_with_footnote()
+        assert not any(ln.rules for ln in pages[0].lines)
+        t = mmd.classify_lines(pages)
+        assert any(v[0] == "footnote" for v in t.values())
+
+    def test_a_caption_at_the_page_foot_stays_a_caption(self):
+        """A figure at the foot of a page puts its caption below the last body
+        line at a smaller size too. The caption has a LABEL, which is the
+        harder evidence, so it is tested first."""
+        pages = self._page_with_footnote()
+        pages[0].lines.insert(10, line("Figure 3: the apparatus", y=110.0, size=8.0))
+        t = mmd.classify_lines(pages)
+        assert t[(1, 10)][0] == "caption"

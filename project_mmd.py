@@ -2299,7 +2299,8 @@ def to_latex(pages: list[PageNode], doc_id: str = "pdfdrill",
 #: Section the document does not contain, and every projection would carry it.
 LINE_TYPES = ("text", "math", "equation", "equation_number", "section_header",
               "code", "diagram", "page_info", "title", "rotated_text",
-              "authors", "abstract", "caption", "table")
+              "authors", "abstract", "caption", "table",
+              "footnote")
 
 
 def _listing_rows(page: PageNode) -> dict:
@@ -2661,6 +2662,72 @@ def _front_matter(pages: list[PageNode], fp, titles: set, running: set) -> tuple
     return authors, abstract
 
 
+def _footnote_lines(pages: list[PageNode], running: set) -> set:
+    """{(page, line index)} for the footnote block at the foot of a page.
+
+    A footnote is not where its MARKER is. The marker sits mid-paragraph and the
+    body sits at the bottom of the column, so reading order places it wrongly
+    and text matching places it on whatever prose is nearest. On 2510.04618 the
+    footnote `We mention IBM CUGA as a rough contextual reference…` was absorbed
+    into a Paragraph, because every line of that document is typed `text`.
+
+    TWO MEASURED PROPERTIES, AND NOT THE ONE THE SPEC ASSUMED. The spec wrote
+    "below the column's last body line, under a horizontal rule, at a size below
+    body" — and that document draws NO footnote rule: its only rules are the
+    table's, 300pt higher up. Requiring one would miss every footnote in it. So
+    the rule is corroborating when present and never required; what is required
+    is measurable without it:
+
+        the line sits BELOW the lowest body-size line on the page, and
+        its type size is SMALLER than the page's modal body size.
+
+    Measured there: body 10.0pt, footnote 8.97pt, last body line at y 123 and
+    the footnote at y 99 and 79.
+
+    A page whose sizes are uniform has no footnote to find — abstaining is the
+    answer, because calling its last lines a footnote deletes them from the
+    prose.
+    """
+    out: set = set()
+    for p in pages:
+        live = [(i, ln) for i, ln in enumerate(p.lines)
+                if ln.glyphs and not ln.rotated
+                and docmodel._run_text(ln.glyphs).strip()
+                and (p.page, i) not in running]
+        if len(live) < 6:
+            continue
+        sizes = [line_size(ln) for _i, ln in live]
+        body = collections.Counter(round(s, 1) for s in sizes).most_common(1)[0][0]
+        if body <= 0:
+            continue
+        # PER COLUMN. On a two-column paper the left column's footnote is not
+        # below the right column's last body line, so one floor for the page
+        # finds nothing — 1909.00741 has four footnotes and yielded none.
+        member = {}
+        try:
+            member = column_membership(p)
+        except Exception:                        # noqa: BLE001
+            member = {}
+        groups: dict = {}
+        for i, ln in live:
+            groups.setdefault(member.get(i, 0), []).append((i, ln))
+        for _col, mine in groups.items():
+            # THE BODY LINE'S TOP, not its bottom. The line reader merges rows,
+            # so the lowest body line on 2510.04618 page 8 is 28pt tall and its
+            # BOTTOM (94.5) sits above the footnote at 99.1 — which excluded the
+            # footnote's first line and kept only its second. A top is a firm
+            # landmark whatever the line swallowed.
+            tops = [ln.rect[3] for _i, ln in mine
+                    if line_size(ln) >= 0.95 * body]
+            if not tops:
+                continue
+            floor = min(tops)
+            cand = [(i, ln) for i, ln in mine
+                    if ln.rect[3] < floor and line_size(ln) < 0.95 * body]
+            out.update((p.page, i) for i, _ln in cand)
+    return out
+
+
 def classify_lines(pages: list[PageNode]) -> dict:
     """{(page number, line index): (type, extra fields)} for the whole document.
 
@@ -2684,6 +2751,7 @@ def classify_lines(pages: list[PageNode]) -> dict:
     running = _running_lines(pages)
     titles = _title_lines(pages)
     authors, abstract = _front_matter(pages, fp, titles, running)
+    footnotes = _footnote_lines(pages, running)
     out: dict = {}
     for p in pages:
         left, right = _left_margin(p), _right_margin(p)
@@ -2711,6 +2779,12 @@ def classify_lines(pages: list[PageNode]) -> dict:
                 out[(p.page, i)] = ("caption",
                                     {"label": cap["label"],
                                      "number": cap["number"]})
+                continue
+            # AFTER caption, because a figure at the foot of a page puts its
+            # caption below the last body line at a smaller size too — and the
+            # caption has a LABEL, which is the harder evidence.
+            if (p.page, i) in footnotes:
+                out[(p.page, i)] = ("footnote", {})
                 continue
             lst = listings.get(i)
             if lst is not None:
