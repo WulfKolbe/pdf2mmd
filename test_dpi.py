@@ -6,6 +6,7 @@ component and hole counts are not stable at 250 dpi.
 """
 
 import json
+import pathlib
 import os
 import shutil
 import threading
@@ -252,3 +253,50 @@ class TestPageImagesBelongToTheDocument:
         """Serving images alone, with nothing to check against, is fine."""
         p = inspectserver.Pages(self._dir(tmp_path), [], None, None, "gs")
         assert p.check_identity([], None) == []
+
+
+class TestACoordinateRatioIsNotAMismatch:
+    """819d — the normal pdfdrill+MathPix pairing IS a 1.6x ratio, and the
+    warning called it a failure.
+
+    MathPix works at 250 dpi (2125x2750 on Letter) and pdf2mmd matches that
+    space deliberately; `pdfdrill inspect` renders its pages at 400 dpi
+    (3400x4400). Both are PIXELS, `scale()` divides one by the other, and crops
+    land exactly right — measured, aspect ratio preserved to the pixel
+    (834/571 = 1334/914). Telling the user "every crop will land off the page"
+    there is false, and it is the first thing they read.
+    """
+
+    def _pages(self, tmp_path, decl_w, decl_h, img_w, img_h):
+        from PIL import Image
+        d = tmp_path / "pages"
+        d.mkdir()
+        Image.new("RGB", (img_w, img_h)).save(d / "p1.png")
+        lines = tmp_path / "x.lines.json"
+        lines.write_text(json.dumps({"pages": [
+            {"page": 1, "image_id": "x-01", "lines": [],
+             "page_width": decl_w, "page_height": decl_h}]}))
+        return inspectserver.Pages(str(d), [str(lines)], None, None, "gs")
+
+    def test_a_dpi_difference_explains_itself(self, tmp_path):
+        notes = self._pages(tmp_path, 2125, 2750, 3400, 4400).check_consistency()
+        assert notes and "both pixels" in notes[0]
+        assert "land off the page" not in notes[0]
+        assert "--coord-width 2125" in notes[0]
+
+    def test_points_are_still_reported_as_the_failure_they_are(self, tmp_path):
+        notes = self._pages(tmp_path, 612, 792, 3400, 4400).check_consistency()
+        assert notes and "PDF POINTS" in notes[0]
+        assert "land off the page" in notes[0]
+
+    def test_the_same_space_says_nothing(self, tmp_path):
+        assert self._pages(tmp_path, 3400, 4400, 3400, 4400).check_consistency() == []
+
+
+def test_the_banner_advertises_the_mask_the_server_actually_uses():
+    """The `g` in `<id>g-<page>.jpg` was a stray character from the docstring
+    example, and it advertised a filename mask the server does not use: the path
+    is the image_id verbatim. Two masks for one thing is one too many."""
+    src = pathlib.Path(inspectserver.__file__).read_text()
+    assert "/cropped/<image_id>.jpg" in src
+    assert "<id>g-<page>" not in src

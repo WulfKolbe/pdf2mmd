@@ -36,7 +36,7 @@ TWO RESOLUTIONS, ON PURPOSE
 PAGE RESOLUTION, in order
   1. ?page=N
   2. image_id found in a loaded lines.json -> its page
-  3. trailing integer of the image_id      (…g-209 -> page 209)
+  3. trailing integer of the image_id      (`…-01` -> page 1)
 
 SCALE RESOLUTION, in order
   1. lines.json page_width/page_height for that page -> exact ratio to the
@@ -189,14 +189,30 @@ class Pages:
                 f"matched to a document. Re-run pdf2mmd.sh to write one.")
         return notes
 
+    #: Below this, a declared page width is PDF POINTS (US Letter is 612, A4 is
+    #: 595). Above it, it is pixels at some dpi. The distinction is the whole
+    #: difference between "every crop will land off the page" and "the pages
+    #: were rendered at a higher dpi and the rectangles are being scaled".
+    POINTS_CEILING = 1200
+
     def check_consistency(self) -> list[str]:
         """Warn at STARTUP about a coordinate space that cannot be right.
 
         Waiting for a request to fail means the first symptom is an HTTP 400
         on an image a Markdown viewer requested silently, which reads as "the
-        server is broken". The mismatch is visible before any request: a
-        lines.json written in PDF points declares a page a few hundred units
-        wide while the page image is a few thousand pixels.
+        server is broken".
+
+        A RATIO IS NOT A MISMATCH. This used to alarm on any ratio above 1.5,
+        and the normal pdfdrill+MathPix pairing IS 1.6: MathPix works at 250 dpi
+        (2125x2750 on Letter) and pdf2mmd matches that space deliberately, while
+        `pdfdrill inspect` renders its pages at 400 dpi (3400x4400). Both are
+        PIXELS, `scale()` divides one by the other, and every crop lands exactly
+        where it should — measured, aspect ratio preserved to the pixel. Saying
+        "every crop will land off the page" there is false, and it is the first
+        thing a user reads.
+
+        The real failure looks different: a lines.json in POINTS declares a page
+        a few HUNDRED units wide, not a few thousand.
         """
         notes = []
         for page, (w, h) in sorted(self.dims.items()):
@@ -209,14 +225,25 @@ class Pages:
             except OSError:
                 continue
             ratio = iw / float(w) if w else 0.0
-            if ratio > 1.5 and page not in self.px_per_pt:
+            if ratio <= 1.05 or page in self.px_per_pt:
+                break
+            if w < self.POINTS_CEILING:
                 notes.append(
-                    f"page {page}: lines.json declares {w:.0f}x{h:.0f} but the "
-                    f"page image is {iw}x{ih} (ratio {ratio:.2f}). If that "
-                    f"lines.json is in PDF POINTS while your crop URLs are in "
-                    f"pixels, every crop will land off the page. Regenerate it "
-                    f"with a current pdf2mmd, or start with --assume-pixels.")
-            break                 # one page is enough to show the mismatch
+                    f"page {page}: lines.json declares {w:.0f}x{h:.0f}, which is "
+                    f"PDF POINTS, while the page image is {iw}x{ih} pixels. Crop "
+                    f"URLs are in pixels, so every crop will land off the page. "
+                    f"Regenerate the lines.json with a current pdf2mmd, or start "
+                    f"with --assume-pixels.")
+            else:
+                notes.append(
+                    f"page {page}: lines.json is {w:.0f}x{h:.0f} and the page "
+                    f"image is {iw}x{ih} — both pixels, {ratio:.2f}x apart "
+                    f"(MathPix renders at 250 dpi, `pdfdrill inspect` at 400). "
+                    f"Rectangles are scaled by {ratio:.2f}; crops land correctly "
+                    f"and come back at the higher resolution. Pass "
+                    f"--coord-width {w:.0f} --coord-height {h:.0f} for crops at "
+                    f"MathPix's exact pixel size.")
+            break                 # one page is enough to show the relationship
         return notes
 
     def page_of(self, image_id: str, q: dict) -> int:
@@ -539,7 +566,12 @@ def main(argv=None):
     elif coord:
         print(f"  coordinate space stated: {coord[0]}x{coord[1]}")
     print(f"  http://{args.host}:{args.port}/healthz")
-    print(f"  http://{args.host}:{args.port}/cropped/<id>g-<page>.jpg"
+    # The `g` here was a stray character copied out of the docstring example
+    # below (`…g-209`, where the g was the tail of a real document id), and it
+    # advertised a filename mask the server does not use: the path is the
+    # image_id verbatim, `bfbc5ae4-…-01.jpg`. Two masks for one thing is one too
+    # many.
+    print(f"  http://{args.host}:{args.port}/cropped/<image_id>.jpg"
           f"?height=..&width=..&top_left_y=..&top_left_x=..")
     if args.pdf:
         print(f"  http://{args.host}:{args.port}/render/p<N>.png?dpi=400"
