@@ -77,6 +77,117 @@ PAGE_RE = re.compile(r"p(\d+)\.png$", re.I)
 TRAILING_INT = re.compile(r"(\d+)\s*$")
 
 
+class Library:
+    r"""Every document's page images at once, indexed by `image_id`.
+
+    820 — this server was built to test ONE document and served one: a second
+    document meant a second process on a second port, which is exactly how it
+    was reported ("never built to serve different documents").
+
+    It does not have to be. Measured over 400 corpus documents: 12,742 distinct
+    `image_id`s and ZERO collisions — a MathPix id is a per-conversion UUID plus
+    a page number, and pdf2mmd's carries the document stem — so an id already
+    identifies (document, page) library-wide. A server that can look one up
+    serves the whole library WITHOUT ANY URL CHANGING: every Markdown link,
+    tiddler and inspect page written against `cdn.mathpix.com` keeps working.
+
+    The index comes from `<doc>/inspect/pages/manifest.json`, which the renderer
+    writes (`pdf2mmd.sh`, and `pdfdrill inspect` since 819e/820). Reading 747
+    small manifests is instant; reading 1,494 `lines.json` — some of them 10 MB —
+    took minutes when measured, which is why the index is not built from those.
+
+    A document's `Pages` is constructed on FIRST USE and cached: 747 folders
+    would otherwise be listed at startup for the one document a request wants.
+    """
+
+    def __init__(self, root: str, gs: str = "gs", assume_pixels: bool = False):
+        self.root = root
+        self.gs = gs
+        self.assume_pixels = assume_pixels
+        self.page_of_id: dict[str, int] = {}
+        self.dir_of_id: dict[str, str] = {}
+        self.coord_of_dir: dict[str, tuple[int, int]] = {}
+        self.doc_of_dir: dict[str, str] = {}
+        self._cache: dict[str, "Pages"] = {}
+        self.skipped: list[str] = []
+        #: documents whose pages are rendered but carry NO manifest at all.
+        #: Distinct from `skipped` (a manifest with no index), and reporting only
+        #: that one said "0 without an index" while 746 of 747 documents were
+        #: unreachable — a folder with no manifest is invisible to the glob.
+        self.unindexed: list[str] = []
+        self._scan()
+
+    def _scan(self) -> None:
+        import glob as _glob
+        # Folders that HAVE page images, so the startup line can say how much of
+        # the library is actually reachable.
+        rendered = {os.path.dirname(q) for q in _glob.glob(
+            os.path.join(self.root, "*", "inspect", "pages", "p1.png"))}
+        pattern = os.path.join(self.root, "*", "inspect", "pages", "manifest.json")
+        for man in sorted(_glob.glob(pattern)):
+            try:
+                with open(man, encoding="utf-8") as fh:
+                    info = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            pages_dir = os.path.dirname(man)
+            ids = info.get("image_ids") or {}
+            if not isinstance(ids, dict) or not ids:
+                # An older manifest carries no index. The document is still
+                # served by name (`?doc=`), it just cannot be reached by id.
+                self.skipped.append(info.get("document") or pages_dir)
+                continue
+            self.doc_of_dir[pages_dir] = str(info.get("document") or "")
+            coord = info.get("coord")
+            if isinstance(coord, list) and len(coord) == 2:
+                try:
+                    self.coord_of_dir[pages_dir] = (int(coord[0]), int(coord[1]))
+                except (TypeError, ValueError):
+                    pass
+            for img, page in ids.items():
+                try:
+                    self.page_of_id[str(img)] = int(page)
+                except (TypeError, ValueError):
+                    continue
+                self.dir_of_id[str(img)] = pages_dir
+        self.unindexed = sorted(
+            os.path.basename(os.path.dirname(os.path.dirname(d)))
+            for d in rendered if d not in self.doc_of_dir)
+
+    # ---------------------------------------------------------------- lookup
+    def pages_for_id(self, image_id: str) -> "Pages | None":
+        return self._pages(self.dir_of_id.get(image_id))
+
+    def pages_for_doc(self, document: str) -> "Pages | None":
+        for d, name in self.doc_of_dir.items():
+            if name == document:
+                return self._pages(d)
+        return None
+
+    def _pages(self, pages_dir: "str | None") -> "Pages | None":
+        if not pages_dir:
+            return None
+        got = self._cache.get(pages_dir)
+        if got is not None:
+            return got
+        try:
+            pg = Pages(pages_dir, None, self.coord_of_dir.get(pages_dir),
+                       None, self.gs, self.assume_pixels)
+        except OSError:
+            return None
+        # Seed the id->page map from the manifest, so no lines.json is opened at
+        # request time — the whole point of indexing the manifests.
+        for img, d in self.dir_of_id.items():
+            if d == pages_dir:
+                pg.id_page[img] = self.page_of_id[img]
+        self._cache[pages_dir] = pg
+        return pg
+
+    @property
+    def documents(self) -> int:
+        return len(self.doc_of_dir)
+
+
 class Pages:
     """The page images, plus any lines.json that fixes the coordinate space."""
 
@@ -436,7 +547,35 @@ class Pages:
 
 class Handler(BaseHTTPRequestHandler):
     pages: Pages = None            # set on the class before serving
+    library: "Library | None" = None   # 820: set instead, for --library mode
     server_version = "inspectserver/1.0"
+
+    def _pages_for(self, image_id: "str | None", q: dict) -> Pages:
+        """The document's Pages for this request.
+
+        Document mode: always the one that was configured. Library mode: the one
+        the `image_id` names — that is the whole point, and it is why the URLs do
+        not change. `?doc=<document>` addresses one by name, for `/pages/` and
+        `/render/`, which carry no id.
+        """
+        if self.library is None:
+            return self.pages
+        want = (q.get("doc") or [None])[0]
+        got = (self.library.pages_for_doc(want) if want
+               else (self.library.pages_for_id(image_id) if image_id else None))
+        if got is not None:
+            return got
+        if want:
+            raise FileNotFoundError(
+                f"no document {want!r} under {self.library.root} — "
+                f"{self.library.documents} indexed; GET / lists them")
+        raise FileNotFoundError(
+            f"image_id {image_id!r} is in none of the "
+            f"{self.library.documents} document(s) indexed under "
+            f"{self.library.root}. Run `pdfdrill inspect <pdf>` on that document "
+            f"to render its pages and write the manifest that indexes them"
+            + (f" ({len(self.library.skipped)} folder(s) have pages but an older "
+               f"manifest with no index)" if self.library.skipped else ""))
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -459,13 +598,36 @@ class Handler(BaseHTTPRequestHandler):
         path, q = u.path, parse_qs(u.query)
         try:
             if path == "/healthz":
+                if self.library is not None:
+                    one = next(iter(self.library.dir_of_id), None)
+                    return self._send(200, json.dumps({
+                        "ok": True,
+                        "mode": "library",
+                        "root": self.library.root,
+                        "documents": self.library.documents,
+                        "image_ids": len(self.library.dir_of_id),
+                        # Folders with pages but no indexed manifest. `skipped`
+                        # is an OLD manifest, `unindexed` is none at all — and
+                        # reporting only the first said "0" while 746 of 747
+                        # documents were unreachable.
+                        "without_an_index": (len(self.library.skipped)
+                                             + len(self.library.unindexed)),
+                        "sample": (f"/cropped/{one}.jpg?height=200&width=400"
+                                   f"&top_left_y=100&top_left_x=100")
+                        if one else None,
+                    }, indent=1).encode(), "application/json")
                 sample = None
                 if self.pages.by_page:
+                    one = next(iter(self.pages.id_page), None)
                     n = sorted(self.pages.by_page)[0]
-                    sample = (f"/cropped/sampleg-{n}.jpg?height=200&width=400"
-                              f"&top_left_y=100&top_left_x=100")
+                    # The sample must be a RESOLVABLE url. It used to be
+                    # `sampleg-<n>`, a made-up id that 404s — and its stray `g`
+                    # is where the wrong filename mask in the banner came from.
+                    sample = (f"/cropped/{one or f'x-{n:02d}'}.jpg"
+                              f"?height=200&width=400&top_left_y=100&top_left_x=100")
                 return self._send(200, json.dumps({
                     "ok": True,
+                    "mode": "document",
                     "pages": len(self.pages.by_page),
                     "page_numbers": sorted(self.pages.by_page)[:20],
                     "lines_json_pages": len(self.pages.dims),
@@ -484,25 +646,41 @@ class Handler(BaseHTTPRequestHandler):
                     # the rectangle arrives in the SAME coordinate space as
                     # /cropped (the lines.json page space), so it is rescaled
                     # to the requested dpi here rather than by the caller
-                    rect = self.pages.rect_at_dpi(page, q, dpi)
-                body, ctype = self.pages.render(page, dpi, device, rect)
+                    rect = self._pages_for(None, q).rect_at_dpi(page, q, dpi)
+                body, ctype = self._pages_for(None, q).render(
+                    page, dpi, device, rect)
                 return self._send(200, body, ctype)
 
             if path.startswith("/pages/"):
                 m = PAGE_RE.search(path)
                 if not m:
                     return self._fail(404, "expected /pages/p<N>.png")
-                body, ctype = self.pages.page_bytes(int(m.group(1)))
+                body, ctype = self._pages_for(None, q).page_bytes(int(m.group(1)))
                 return self._send(200, body, ctype)
 
             if path.startswith("/cropped/"):
                 tail = path[len("/cropped/"):]
                 fmt = "png" if tail.lower().endswith(".png") else "jpg"
                 image_id = re.sub(r"\.(jpe?g|png)$", "", tail, flags=re.I)
-                body, ctype = self.pages.crop(image_id, q, fmt)
+                # 820 — in library mode the image_id names the document, so one
+                # process serves them all and no URL has to change.
+                pages = self._pages_for(image_id, q)
+                body, ctype = pages.crop(image_id, q, fmt)
                 return self._send(200, body, ctype)
 
             if path == "/":
+                if self.library is not None:
+                    docs = sorted(set(self.library.doc_of_dir.values()))
+                    rows = "".join(
+                        f'<li>{d} '
+                        f'<a href="/pages/p1.png?doc={d}">p1.png</a></li>'
+                        for d in docs)
+                    html = (f"<h1>inspectserver — library</h1><p>"
+                            f"{len(docs)} document(s), "
+                            f"{len(self.library.dir_of_id)} image id(s) from "
+                            f"{self.library.root}</p><ul>{rows}</ul>")
+                    return self._send(200, html.encode(),
+                                      "text/html; charset=utf-8")
                 rows = "".join(
                     f'<li><a href="/pages/p{n}.png">p{n}.png</a></li>'
                     for n in sorted(self.pages.by_page))
@@ -530,9 +708,14 @@ class Handler(BaseHTTPRequestHandler):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--pages", required=True,
+    ap.add_argument("--pages",
                     help="folder of page images named p<N>.png "
                          "(pdfdrill writes <drill>/inspect/pages)")
+    ap.add_argument("--library",
+                    help="serve EVERY document under this root, indexed by "
+                         "image_id from each <doc>/inspect/pages/manifest.json "
+                         "(820). One process for the whole library, and no URL "
+                         "changes: an image_id already names its document.")
     ap.add_argument("--lines", action="append", default=[],
                     help="a lines.json, or a folder of them, fixing the "
                          "coordinate space (repeatable)")
@@ -548,6 +731,39 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args(argv)
+
+    if not (args.pages or args.library):
+        ap.error("one of --pages (a single document) or --library (all of them)")
+    if args.pages and args.library:
+        ap.error("--pages and --library are the two modes; pick one")
+
+    if args.library:
+        Handler.library = Library(args.library, args.gs, args.assume_pixels)
+        lib = Handler.library
+        if not lib.dir_of_id:
+            sys.exit(
+                f"no indexed documents under {args.library}. A document is "
+                f"indexed when <doc>/inspect/pages/manifest.json lists its "
+                f"image_ids — `pdfdrill inspect <pdf>` writes that."
+                + (f" ({len(lib.skipped)} folder(s) have pages but an older "
+                   f"manifest with no index; re-run inspect on those.)"
+                   if lib.skipped else ""))
+        print(f"inspectserver: {lib.documents} document(s), "
+              f"{len(lib.dir_of_id)} image id(s) from {args.library}")
+        missing = lib.skipped + lib.unindexed
+        if missing:
+            print(f"  ! {len(missing)} document(s) have rendered pages but no "
+                  f"index, so their crops cannot be resolved by image_id "
+                  f"(`pdfdrill inspect <pdf>` writes it): "
+                  f"{', '.join(missing[:3])}"
+                  + (f" … and {len(missing) - 3} more" if len(missing) > 3 else ""),
+                  file=sys.stderr)
+        print(f"  http://{args.host}:{args.port}/healthz")
+        print(f"  http://{args.host}:{args.port}/cropped/<image_id>.jpg"
+              f"?height=..&width=..&top_left_y=..&top_left_x=..")
+        print(f"  http://{args.host}:{args.port}/            (the documents)")
+        ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+        return 0
 
     coord = None
     if args.coord_width and args.coord_height:

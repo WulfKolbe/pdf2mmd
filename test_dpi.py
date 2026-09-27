@@ -300,3 +300,91 @@ def test_the_banner_advertises_the_mask_the_server_actually_uses():
     src = pathlib.Path(inspectserver.__file__).read_text()
     assert "/cropped/<image_id>.jpg" in src
     assert "<id>g-<page>" not in src
+
+
+class TestTheLibraryServesEveryDocument:
+    """820 — one process for the whole library, and no URL changes.
+
+    The server was built to test ONE document and served one: a second document
+    meant a second process on a second port. Measured over 400 corpus documents:
+    12,742 distinct image_ids and ZERO collisions, because a MathPix id is a
+    per-conversion UUID plus a page number — so an id already identifies
+    (document, page) library-wide.
+    """
+
+    def _lib(self, tmp_path, docs):
+        """docs = {name: {image_id: page}} -> a library root with manifests."""
+        from PIL import Image
+        for name, ids in docs.items():
+            d = tmp_path / name / "inspect" / "pages"
+            d.mkdir(parents=True)
+            for page in sorted(set(ids.values())):
+                Image.new("RGB", (3400, 4400)).save(d / f"p{page}.png")
+            man = {"document": name, "dpi": 400,
+                   "pages": len(set(ids.values())),
+                   "coord": [2125, 2750]}
+            if ids:
+                man["image_ids"] = ids
+            (d / "manifest.json").write_text(json.dumps(man))
+        return inspectserver.Library(str(tmp_path))
+
+    def test_an_image_id_finds_its_own_document(self, tmp_path):
+        lib = self._lib(tmp_path, {
+            "docA": {"aaaa-01": 1, "aaaa-02": 2},
+            "docB": {"bbbb-01": 1},
+        })
+        assert lib.documents == 2
+        assert len(lib.dir_of_id) == 3
+        a = lib.pages_for_id("aaaa-02")
+        b = lib.pages_for_id("bbbb-01")
+        assert a is not None and b is not None
+        assert a is not b
+        assert "docA" in a.root and "docB" in b.root
+
+    def test_the_page_comes_from_the_manifest_not_a_lines_json(self, tmp_path):
+        """The whole point of indexing manifests: no 10 MB lines.json is opened
+        at request time."""
+        lib = self._lib(tmp_path, {"docA": {"aaaa-07": 7}})
+        pg = lib.pages_for_id("aaaa-07")
+        assert pg.id_page["aaaa-07"] == 7
+        assert pg.dims == {}          # nothing was loaded from a lines.json
+
+    def test_the_coordinate_space_comes_from_the_manifest_too(self, tmp_path):
+        lib = self._lib(tmp_path, {"docA": {"aaaa-01": 1}})
+        pg = lib.pages_for_id("aaaa-01")
+        assert pg.coord == (2125, 2750)
+        # and it scales: 400 dpi image against a 250 dpi coordinate space
+        assert pg.scale(1, 3400, 4400) == (1.6, 1.6)
+
+    def test_a_document_is_built_once_and_cached(self, tmp_path):
+        lib = self._lib(tmp_path, {"docA": {"aaaa-01": 1, "aaaa-02": 2}})
+        assert lib.pages_for_id("aaaa-01") is lib.pages_for_id("aaaa-02")
+
+    def test_a_document_can_be_addressed_by_name(self, tmp_path):
+        lib = self._lib(tmp_path, {"docA": {"aaaa-01": 1}})
+        assert lib.pages_for_doc("docA") is not None
+        assert lib.pages_for_doc("nope") is None
+
+    def test_an_unknown_id_is_not_served_from_the_wrong_document(self, tmp_path):
+        """The hazard the manifest guard exists for: a crop showing a figure from
+        an entirely different book under the right caption."""
+        lib = self._lib(tmp_path, {"docA": {"aaaa-01": 1}})
+        assert lib.pages_for_id("bbbb-01") is None
+
+    def test_a_manifest_with_no_index_is_reported_not_silently_dropped(self, tmp_path):
+        lib = self._lib(tmp_path, {"docA": {"aaaa-01": 1}, "docB": {}})
+        assert lib.documents == 1
+        assert "docB" in lib.skipped
+
+    def test_pages_with_no_manifest_at_all_are_counted(self, tmp_path):
+        """A folder with no manifest is invisible to the glob, so reporting only
+        `skipped` said "0 without an index" while 746 of 747 documents were
+        unreachable."""
+        from PIL import Image
+        lib_root = tmp_path
+        self._lib(lib_root, {"docA": {"aaaa-01": 1}})
+        bare = lib_root / "docC" / "inspect" / "pages"
+        bare.mkdir(parents=True)
+        Image.new("RGB", (100, 100)).save(bare / "p1.png")
+        lib = inspectserver.Library(str(lib_root))
+        assert lib.unindexed == ["docC"]
