@@ -875,6 +875,9 @@ def project(family: str, glyphname: str | None,
     not in the table, or not verified. A caller must treat `latex is None` as
     "keep the blob" — never as "emit nothing and move on".
     """
+    _sym = symbol_pua_latex(glyphname, fontname)
+    if _sym is not None:
+        return TexToken(_sym, "atom", None, "symbol-font")
     if glyphname and codepoint_of(glyphname) is not None:
         # 786 — THE FONT STATED THE CODEPOINT. `uni1D6FC` / `u1D719` is an
         # identity, not a guess, so it is answered before the per-family
@@ -979,6 +982,79 @@ _MATH_ALPHA = [
 ]
 
 _GREEK_ITALIC = (0x1D6FC, 0x1D6FD, 0x1D6FE, 0x1D6FF)   # alpha..delta run
+
+
+#: 787 — the published Adobe Symbol encoding, byte -> LaTeX. A PDF that uses
+#: the Symbol font maps each glyph into the Private Use Area at 0xF000 + byte,
+#: so U+F065 is byte 0x65 is `epsilon`.
+#:
+#: The ASSEMBLY PIECES ARE ABSENT ON PURPOSE. 0xE6..0xEF and 0xF3..0xFE are the
+#: top/middle/bottom/extension fragments of tall parentheses, brackets, braces
+#: and integrals; 0xBD/0xBE are arrow extensions and 0x60 is the radical
+#: extension. None is a character. They belong to the assembly pass, and
+#: emitting one puts a bracket shard in the middle of an equation — the same
+#: judgement that keeps U+239C unmapped.
+_SYMBOL_PUA = {
+    0x20: " ", 0x21: "!", 0x22: r"\forall", 0x23: "#", 0x24: r"\exists",
+    0x25: r"\%", 0x26: r"\&", 0x27: r"\ni", 0x28: "(", 0x29: ")",
+    0x2A: r"\ast", 0x2B: "+", 0x2C: ",", 0x2D: "-", 0x2E: ".", 0x2F: "/",
+    0x30: "0", 0x31: "1", 0x32: "2", 0x33: "3", 0x34: "4", 0x35: "5",
+    0x36: "6", 0x37: "7", 0x38: "8", 0x39: "9",
+    0x3A: ":", 0x3B: ";", 0x3C: "<", 0x3D: "=", 0x3E: ">", 0x3F: "?",
+    0x40: r"\cong",
+    0x41: r"\mathrm{A}", 0x42: r"\mathrm{B}", 0x43: r"\mathrm{X}",
+    0x44: r"\Delta", 0x45: r"\mathrm{E}", 0x46: r"\Phi", 0x47: r"\Gamma",
+    0x48: r"\mathrm{H}", 0x49: r"\mathrm{I}", 0x4A: r"\vartheta",
+    0x4B: r"\mathrm{K}", 0x4C: r"\Lambda", 0x4D: r"\mathrm{M}",
+    0x4E: r"\mathrm{N}", 0x4F: r"\mathrm{O}", 0x50: r"\Pi", 0x51: r"\Theta",
+    0x52: r"\mathrm{P}", 0x53: r"\Sigma", 0x54: r"\mathrm{T}",
+    0x55: r"\Upsilon", 0x56: r"\varsigma", 0x57: r"\Omega", 0x58: r"\Xi",
+    0x59: r"\Psi", 0x5A: r"\mathrm{Z}",
+    0x5B: "[", 0x5C: r"\therefore", 0x5D: "]", 0x5E: r"\perp", 0x5F: r"\_",
+    0x61: r"\alpha", 0x62: r"\beta", 0x63: r"\chi", 0x64: r"\delta",
+    0x65: r"\epsilon", 0x66: r"\phi", 0x67: r"\gamma", 0x68: r"\eta",
+    0x69: r"\iota", 0x6A: r"\varphi", 0x6B: r"\kappa", 0x6C: r"\lambda",
+    0x6D: r"\mu", 0x6E: r"\nu", 0x6F: "o", 0x70: r"\pi", 0x71: r"\theta",
+    0x72: r"\rho", 0x73: r"\sigma", 0x74: r"\tau", 0x75: r"\upsilon",
+    0x76: r"\varpi", 0x77: r"\omega", 0x78: r"\xi", 0x79: r"\psi",
+    0x7A: r"\zeta",
+    0x7B: r"\{", 0x7C: r"\mid", 0x7D: r"\}", 0x7E: r"\sim",
+    0xA2: r"\prime", 0xA3: r"\leq", 0xA4: "/", 0xA5: r"\infty",
+    0xAB: r"\leftrightarrow", 0xAC: r"\leftarrow", 0xAD: r"\uparrow",
+    0xAE: r"\rightarrow", 0xAF: r"\downarrow",
+    0xB0: r"^{\circ}", 0xB1: r"\pm", 0xB2: r"\prime\prime",
+    0xB3: r"\geq", 0xB4: r"\times", 0xB5: r"\propto", 0xB6: r"\partial",
+    0xB7: r"\cdot", 0xB8: r"\div", 0xB9: r"\neq", 0xBA: r"\equiv",
+    0xBB: r"\approx", 0xBC: r"\ldots",
+    0xC0: r"\aleph", 0xC1: r"\Im", 0xC2: r"\Re", 0xC3: r"\wp",
+    0xC4: r"\otimes", 0xC5: r"\oplus", 0xC6: r"\emptyset",
+    0xC7: r"\cap", 0xC8: r"\cup", 0xC9: r"\supset", 0xCA: r"\supseteq",
+    0xCB: r"\not\subset", 0xCC: r"\subset", 0xCD: r"\subseteq",
+    0xCE: r"\in", 0xCF: r"\notin",
+    0xD0: r"\angle", 0xD1: r"\nabla", 0xD5: r"\prod", 0xD6: r"\surd",
+    0xD7: r"\cdot", 0xD8: r"\neg", 0xD9: r"\wedge", 0xDA: r"\vee",
+    0xDB: r"\Leftrightarrow", 0xDC: r"\Leftarrow", 0xDD: r"\Uparrow",
+    0xDE: r"\Rightarrow", 0xDF: r"\Downarrow",
+    0xE0: r"\lozenge", 0xE1: r"\langle", 0xE5: r"\sum",
+    0xF1: r"\rangle", 0xF2: r"\int",
+}
+
+#: The font whose private slots mean the table above. Matched on the NAME,
+#: because that is the only thing distinguishing these slots from any other
+#: font's internal numbering. A subset prefix (`ABCDEE+Symbol`) is still Symbol.
+_SYMBOL_FONT = re.compile(r"(?:^|\+)Symbol(?:MT|PS)?\b", re.I)
+
+
+def symbol_pua_latex(glyphname: str, fontname: "str | None") -> "str | None":
+    """LaTeX for a Symbol-font glyph the PDF hid in the Private Use Area."""
+    if not fontname or not _SYMBOL_FONT.search(fontname):
+        return None
+    if not glyphname or len(glyphname) != 1:
+        return None
+    cp = ord(glyphname)
+    if not (0xF000 <= cp <= 0xF0FF):
+        return None
+    return _SYMBOL_PUA.get(cp - 0xF000)
 
 
 def codepoint_of(glyphname: str) -> int | None:

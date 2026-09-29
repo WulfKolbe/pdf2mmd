@@ -2699,6 +2699,20 @@ def build(path: str, pages: Iterable[int] | None = None) -> list[PageNode]:
                     # MathPix deferred 24 of its 36 maths spans on `\partial`,
                     # `\prime` and `-`.
                     gname = texmap.cm_glyphname(o.fontname, o.cid)
+                if not gname and texmap.symbol_pua_latex(
+                        o.get_text(), o.fontname) is not None:
+                    # 787 — THE IDENTITY WAS IN THE ToUnicode ALL ALONG. A
+                    # subsetted Symbol font arrives with no glyph names at
+                    # all, so the PUA codepoint the ToUnicode gives is the
+                    # only thing that says which glyph this is — and it says
+                    # it exactly, because that codepoint IS 0xF000 plus the
+                    # font's own byte. Same shape as `cm_glyphname` above:
+                    # recover the name the subsetting threw away, from
+                    # evidence the font itself supplies, gated on the font.
+                    #
+                    # Without this the table added to texmap was unreachable:
+                    # `project` keys on the glyph NAME, and there was none.
+                    gname = o.get_text()
                 glyphs.append(
                     GlyphNode(
                         id=f"p{pno}g{n}", page=pno,
