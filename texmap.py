@@ -92,9 +92,20 @@ FAMILY_RULES = [
     # The `<Family>Math<Role>` naming that modern OpenType-era maths packages
     # use -- `XCharterMathMI` is XCharter's maths italic and was read as text.
     # Kept AFTER the explicit rules above so a known family still wins.
-    (re.compile(r"\w*Math(Italic|MI)\w*", re.I), "math-italic"),
-    (re.compile(r"\w*Math(Symbols?|SY)\w*", re.I), "math-symbol"),
-    (re.compile(r"\w*Math(Extension|EX)\w*", re.I), "math-extension"),
+    # 828 — `\w` DOES NOT MATCH A HYPHEN, and a TeX font family is as likely
+    # to write `Fourier-Math-Extension` as `XCharterMathEX`. Cahiers GUTenberg
+    # 51 (Fourier-GUTenberg, Utopia + Fourier) ships three of them —
+    # Fourier-Math-Symbols, Fourier-Math-Letters, Fourier-Math-Extension — and
+    # every one fell through to "text", so the document's whole maths font
+    # layer was read with the text tables: `integraldisplay` (a display
+    # integral) projects to `\int` under math-extension and to nothing under
+    # text, and came out as `(cid:110)`.
+    #
+    # The separator is optional and may be `-`, `_` or a space; `Letters` is
+    # Fourier's name for what other families call `Italic`.
+    (re.compile(r"[\w-]*Math[-_ ]?(Italic|MI|Letters?)[\w-]*", re.I), "math-italic"),
+    (re.compile(r"[\w-]*Math[-_ ]?(Symbols?|SY)[\w-]*", re.I), "math-symbol"),
+    (re.compile(r"[\w-]*Math[-_ ]?(Extension|EX)[\w-]*", re.I), "math-extension"),
     # DOUBLESTROKE (`dsfont`): a whole font whose every glyph is
     # blackboard-bold, digits included. Unknown here it fell through to
     # "text", so `dsrom12`'s `one` -- which is the IDENTITY MATRIX, the
@@ -407,6 +418,13 @@ _MATH_SYMBOL = {
     "turnstileright": r"\vdash",
     "Ifractur": r"\Im", "Rfractur": r"\Re",
     "angbracketleft": r"\langle", "angbracketright": r"\rangle",
+    # 828 — the SAME GLYPH under Adobe's name. Computer Modern calls it
+    # `angbracketleft`; Fourier, Utopia and every Type 1 that follows the
+    # Adobe glyph list call it `angleleft`. Cahiers GUTenberg 51 is a paper
+    # about XML and MathML, so ⟨tag⟩ notation is on nearly every page: 77 of
+    # its 93 deferrals were these two names, and each one defers the whole
+    # maths span it sits in.
+    "angleleft": r"\langle", "angleright": r"\rangle",
     "braceleft": r"\{", "braceright": r"\}",
     "bracketleft": "[", "bracketright": "]",
     "floorright": r"\rfloor", "floorleft": r"\lfloor",
