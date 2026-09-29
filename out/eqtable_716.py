@@ -682,46 +682,17 @@ def table_open(caption: str, widths, heads, banner: str) -> str:
 def provenance() -> str:
     """Which reader produced the pdf2mmd column, and when this was built.
 
-    743 -- "was the table rendered after the last change?" could only be
-    answered by comparing file mtimes outside the document, and three
-    different builds had been sent under the same name. The PDF now says it
-    itself.
-
-    753 -- FROM GIT, now that the code is a repository. An mtime says when a
-    file was last WRITTEN, which after a clone or a copy is the moment of
-    copying and nothing about the code: moving this repo made every source
-    file read `20260921-1107` and the stamp became a lie. A commit hash
-    cannot drift that way. The mtime scheme is kept for a tree that is not a
-    checkout, and a dirty tree says so.
+    785 — the body of this moved to `provenance.py` so the TOOL can stamp its
+    own output too. It could not before: this lived in out/, and a document's
+    mmd-out therefore said nothing about which install wrote it. Two on one
+    machine, and 347 GB of results could only be dated, not identified.
     """
     import datetime
-    import subprocess
-    src = Path(os.environ.get("PDF2MMD_CODE",
-                              Path(__file__).resolve().parent.parent))
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import provenance as prov
     built = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    def git(*a):
-        return subprocess.run(["git", "-C", str(src), *a],
-                              capture_output=True, text=True,
-                              timeout=30).stdout.strip()
-
-    try:
-        head = git("rev-parse", "--short", "HEAD")
-        if head:
-            when = git("log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M")
-            dirty = " +local changes" if git("status", "--porcelain") else ""
-            return ("pdf2mmd %s of %s%s — table built %s"
-                    % (head, when, dirty, built))
-    except Exception:
-        pass
-
-    newest, name = 0.0, "?"
-    for f in sorted(src.glob("*.py")):
-        if f.stat().st_mtime > newest:
-            newest, name = f.stat().st_mtime, f.name
-    rev = datetime.datetime.fromtimestamp(newest).strftime("%Y%m%d-%H%M")
-    return ("pdf2mmd revision %s (newest source: %s, not a checkout) "
-            "— table built %s" % (rev, name, built))
+    return "%s — table built %s" % (prov.stamp(), built)
 
 
 def main():

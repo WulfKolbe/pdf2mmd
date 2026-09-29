@@ -28,6 +28,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import docmodel_six as docmodel
+import provenance
 import docpack
 import equations as eqmod                                            # noqa: E402
 import project_mmd as mmd                                  # noqa: E402
@@ -125,7 +126,9 @@ def main(argv=None) -> int:
     # The equation evidence table: one row per equation, with the LaTeX, the
     # crop region and what is known about how complete each is.
     with open(base + ".equations.json", "w", encoding="utf-8") as fh:
-        json.dump(eqmod.to_json(pages, bibkey=stem), fh, indent=1)
+        _eq = eqmod.to_json(pages, bibkey=stem)
+        _eq["produced_by"] = provenance.identity()      # 785
+        json.dump(_eq, fh, indent=1)
     with open(os.path.join(os.path.dirname(base), "model.docmodel.json"),
               "w", encoding="utf-8") as fh:
         json.dump(docpack.to_docmodel(pages, bibkey=stem,
@@ -137,6 +140,14 @@ def main(argv=None) -> int:
     m = stats["math_spans"]
     pct = 100.0 * stats["projected"] / m if m else 0.0
     lines = [
+        # 785 — WHO PRODUCED THIS. The report recorded everything about the
+        # document and nothing about the reader, so when two installs existed
+        # on one machine (a checkout at 784 and a standalone copy frozen days
+        # earlier) their results could only be told apart by file mtime, which
+        # is evidence about the filesystem and not about the code. 347 GB of
+        # output had to be dated rather than identified.
+        provenance.built_line(),
+        "",
         f"document      {stem}",
         f"pages         {rng.start + 1}-{rng.stop} of {total}",
         f"glyphs        {stats['glyphs']}",
