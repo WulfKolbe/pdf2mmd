@@ -875,6 +875,15 @@ def project(family: str, glyphname: str | None,
     not in the table, or not verified. A caller must treat `latex is None` as
     "keep the blob" — never as "emit nothing and move on".
     """
+    if glyphname and codepoint_of(glyphname) is not None:
+        # 786 — THE FONT STATED THE CODEPOINT. `uni1D6FC` / `u1D719` is an
+        # identity, not a guess, so it is answered before the per-family
+        # tables (which are keyed by PostScript names and never hold these).
+        # Checked first because a family table that happens to contain the
+        # literal string would be answering a different question.
+        _u = unicode_latex(glyphname)
+        if _u is not None:
+            return TexToken(_u, "atom", None, "unicode")
     if not glyphname:
         # One identity survives a missing glyph name: MSBM10's blackboard
         # capitals, which are keyed by CID. Everything else abstains, as
@@ -994,7 +1003,16 @@ def _alphanumeric(cp: int) -> str | None:
         if idx < len(greek):
             name = greek[idx]
             return " " if name == "omicron" else "\\" + name
-        return None
+        # 786 — the run does NOT end at omega. Seven variant letters close it,
+        # and returning None for them deferred whole spans on a single glyph:
+        # U+1D719 (phi symbol) alone accounted for 2 of 2405.08011v1's 9
+        # deferrals. They are variants, so they take the \var... names where
+        # LaTeX has one.
+        tail = {0x1D715: "\\partial", 0x1D716: "\\epsilon",
+                0x1D717: "\\vartheta", 0x1D718: "\\varkappa",
+                0x1D719: "\\phi", 0x1D71A: "\\varrho",
+                0x1D71B: "\\varpi"}
+        return tail.get(cp)
     if 0x1D6A8 <= cp <= 0x1D6C0:                     # bold capital Greek
         caps = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta",
                 "Theta", "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi",
@@ -1058,6 +1076,35 @@ _DINGBAT = {
 }
 
 
+#: 786 — letterlike symbols that sit OUTSIDE the Mathematical Alphanumeric
+#: blocks, so `_alphanumeric` cannot reach them and `chr(cp).isalnum()` is
+#: false. ℎ is an italic h and nothing more; ℏ and ℘ have their own LaTeX.
+_LETTERLIKE = {0x210E: "h", 0x210F: "\\hbar", 0x2118: "\\wp",
+               # 786 — double-struck letters. A font that names its glyphs by
+               # codepoint writes ℂ as `uni2102`; 482 occurrences of it and 214
+               # of ℝ deferred their whole span in a 10-document sample.
+               0x2102: "\\mathbb{C}", 0x210D: "\\mathbb{H}",
+               0x2115: "\\mathbb{N}", 0x2119: "\\mathbb{P}",
+               0x211A: "\\mathbb{Q}", 0x211D: "\\mathbb{R}",
+               0x2124: "\\mathbb{Z}", 0x2113: "\\ell",
+               0x2215: "/", 0x223C: "\\sim", 0x2212: "-"}
+
+#: 786 — ASCII PUNCTUATION IS NOT ALPHANUMERIC, and that one word cost more
+#: than every exotic symbol combined: `unicode_latex` ended with
+#: `ch.isalnum() and cp < 0x2000`, so a font naming its comma `uni002C`
+#: produced no LaTeX and deferred the entire maths span around it. In a
+#: 10-document random sample that was 3,028 commas and 847 full stops — 57%
+#: of all unmapped-glyph occurrences, against 338 for the whole Greek run.
+#:
+#: Only characters that are safe BARE in math mode are passed through; the
+#: ones LaTeX reserves get their escaped form. `^`, `~` and `\` are absent
+#: deliberately: as a literal glyph each needs a text-mode command, and
+#: guessing which is how a superscript becomes a stray accent.
+_MATH_SAFE = set(",.;:!?()[]/|*+-=<>@")
+_ESCAPED = {"{": "\\{", "}": "\\}", "%": "\\%", "&": "\\&",
+            "#": "\\#", "$": "\\$", "_": "\\_"}
+
+
 def unicode_latex(glyphname: str) -> str | None:
     """LaTeX for a glyph named by its codepoint, or None."""
     if glyphname in _DINGBAT:
@@ -1067,6 +1114,14 @@ def unicode_latex(glyphname: str) -> str | None:
         return None
     if cp in _UNI_LATEX:
         return _UNI_LATEX[cp]
+    if cp in _LETTERLIKE:
+        return _LETTERLIKE[cp]
+    if cp < 0x80:
+        ch_ = chr(cp)
+        if ch_ in _ESCAPED:
+            return _ESCAPED[ch_]
+        if ch_ in _MATH_SAFE:
+            return ch_
     got = _alphanumeric(cp)
     if got is not None:
         return got
